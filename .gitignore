@@ -15,3 +15,5 @@ War3.mpq
 /share/openwow-config.cfg
 /share/autoexec.cfg
 share/characters.xml
+# Added by code-review-graph
+.code-review-graph/
