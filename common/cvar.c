@@ -411,7 +411,8 @@ void Cvar_Init(void) {
     Cvar_Get("config", "share/openwarcraft3-config.cfg", CVAR_ARCHIVE);
 #endif
     Cvar_Get("data", "", CVAR_ARCHIVE);
-    Cvar_Get("fs_expansion", "0", 0);
+    /* TFT archives extend the RoC asset set; -roc explicitly selects the old base-only behavior. */
+    Cvar_Get("fs_expansion", "1", 0);
     Cvar_Get("map", "", 0);
     Cvar_Get("connect", "", 0);
     Cvar_Get("cl_debug_entities", "0", 0);
