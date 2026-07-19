@@ -51,7 +51,9 @@ Each ADT chunk can carry up to four texture layers. The renderer stores:
 - optional normals,
 - bounds for culling.
 
-The splat path has a small Z bias and height-delta guard to keep layer geometry close to terrain without exploding across sharp height changes.
+The splat path has a small Z bias and height-delta guard to keep layer geometry close to terrain without exploding
+across sharp height changes. Circular selection, hover, cursor, and ability feedback is submitted as a
+diameter-sized rectangle whose texture and subdivided vertices conform to the streamed ADT terrain.
 
 ## Grass
 

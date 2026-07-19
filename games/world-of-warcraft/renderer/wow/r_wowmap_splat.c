@@ -168,14 +168,6 @@ void R_RenderFlatRectSplat(LPCVECTOR2 mins, LPCVECTOR2 maxs, FLOAT z, LPCTEXTURE
     R_Call(glDepthMask, GL_TRUE);
 }
 
-void R_RenderSplat(LPCVECTOR2 position, float radius, LPCTEXTURE texture, LPCSHADER shader, COLOR32 color) {
-    (void)position;
-    (void)radius;
-    (void)texture;
-    (void)shader;
-    (void)color;
-}
-
 VECTOR2 GetWar3MapSize(LPCWAR3MAP war3Map) {
     (void)war3Map;
     return (VECTOR2){ 0.0f, 0.0f };
