@@ -387,5 +387,6 @@ void Wow_LoadCameraAdts(void) {
         return;
     }
 
+    Wow_UpdateMinimap(center_x, center_y);
     Wow_LoadNearbyAdts(center_x, center_y);
 }

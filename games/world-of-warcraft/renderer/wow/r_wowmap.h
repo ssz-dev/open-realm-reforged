@@ -312,6 +312,8 @@ void Wow_LoadMapDbcFlags(void);
 void Wow_LoadGroundEffectDBCs(void);
 void Wow_LoadNearbyAdts(int center_x, int center_y);
 void Wow_LoadCameraAdts(void);
+void Wow_UpdateMinimap(int tile_x, int tile_y);
+void Wow_ShutdownMinimap(void);
 void Wow_InitGrassShader(void);
 void Wow_BuildGrassForChunk(wowAdtChunk_t *chunk, BYTE const alpha[4][WOW_ALPHA_TEXELS], wowLayer_t const *layers, DWORD layer_count);
 BOOL Wow_GrassChunkInRange(wowAdtChunk_t const *chunk);

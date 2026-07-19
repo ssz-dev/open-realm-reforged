@@ -312,6 +312,32 @@ static void R_DrawMinimapCameraRect(LPCRECT screen) {
     R_Call(glDrawArrays, GL_LINE_STRIP, 0, 5);
 }
 
+/* Draw the visible portion of a moving 3x3 tile grid without exposing tile seams. */
+static void R_DrawTiledMinimap(LPCRECT screen) {
+    FLOAT span = tr.minimap_tiles.span;
+    FLOAT left = 1.0f + tr.minimap_tiles.center.x - span * 0.5f;
+    FLOAT top = 1.0f + tr.minimap_tiles.center.y - span * 0.5f;
+
+    if (span <= 0.0f) return;
+    FOR_LOOP(row, 3) {
+        FOR_LOOP(col, 3) {
+            LPCTEXTURE tile = tr.minimap_tiles.tiles[row][col];
+            FLOAT x0 = MAX(left, (FLOAT)col), x1 = MIN(left + span, (FLOAT)col + 1.0f);
+            FLOAT y0 = MAX(top, (FLOAT)row), y1 = MIN(top + span, (FLOAT)row + 1.0f);
+            RECT dst, uv;
+
+            if (!tile || x0 >= x1 || y0 >= y1) continue;
+            dst = MAKE(RECT,
+                       screen->x + (x0 - left) * screen->w / span,
+                       screen->y + (y0 - top) * screen->h / span,
+                       (x1 - x0) * screen->w / span,
+                       (y1 - y0) * screen->h / span);
+            uv = MAKE(RECT, x0 - col, y0 - row, x1 - x0, y1 - y0);
+            R_DrawImage(tile, &dst, &uv, COLOR32_WHITE);
+        }
+    }
+}
+
 /* Inverse of R_MinimapPointForWorld: map a window-pixel click over the minimap
  * to a world position, so a minimap click can recenter the camera. */
 bool R_TraceMinimap(float x, float y, LPVECTOR2 outWorld) {
@@ -355,8 +381,11 @@ void R_DrawMinimap(LPCRECT screen) {
     tr.minimapRect = *screen;
     tr.hasMinimap = true;
 
-    LPCTEXTURE tex = tr.minimap ? tr.minimap : tr.texture[TEX_WHITE];
-    R_DrawImage(tex, screen, &MAKE(RECT, 0, 0, 1, 1), COLOR32_WHITE);
+    if (tr.minimap_tiles.active) R_DrawTiledMinimap(screen);
+    else {
+        LPCTEXTURE tex = tr.minimap ? tr.minimap : tr.texture[TEX_WHITE];
+        R_DrawImage(tex, screen, &MAKE(RECT, 0, 0, 1, 1), COLOR32_WHITE);
+    }
 
     if (tr.world && tr.shader[SHADER_MINIMAP_FOG]) {
         DWORD const fow_texid = R_GetMinimapFogOfWarTexture();

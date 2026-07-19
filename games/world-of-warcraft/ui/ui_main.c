@@ -212,6 +212,7 @@ static void UIWow_Init(void) {
     UIWow_RegisterMenuCommands();
     UIWow_EnsureRenderer();
     UIWow_InitLua();
+    UIWow_GmInit();
 }
 
 static void UIWow_Shutdown(void) {
@@ -250,6 +251,8 @@ static void UIWow_Refresh(DWORD time) {
         UIWow_XMLDraw();
         UIWow_CallLuaDraw();
     }
+    if (ps && ps->client_ui_state == CLIENT_UI_GAME)
+        UIWow_GmDraw();
 }
 
 static void UIWow_ReleaseScreenAssets(void) {
@@ -358,6 +361,9 @@ static void UIWow_TextInput(LPCSTR text) {
 
 static BOOL UIWow_MouseEvent(uiMouseEvent_t event, int x, int y, int32_t param) {
     VECTOR2 mouse_pos;
+    if (UIWow_GmMouseEvent(event, x, y, param)) {
+        return true;
+    }
     if (wow_ui.game_mode) {
         return false;
     }

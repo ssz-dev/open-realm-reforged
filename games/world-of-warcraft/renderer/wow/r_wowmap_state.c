@@ -158,6 +158,8 @@ void Wow_FreeWorld(void) {
     wowDoodadModel_t *doodad_model;
 
     Wow_FreeChunks();
+    SAFE_DELETE(tr.minimap, R_ReleaseTexture);
+    Wow_ShutdownMinimap();
     Wow_FreeWmoInstances();
     Wow_FreeWmoModels();
     wowTextureCache_t *texture = wow_world.textures;

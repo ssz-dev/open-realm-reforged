@@ -29,6 +29,9 @@ static BYTE test_last_unicast_buf[MAX_MSGLEN];
 static DWORD test_multicast_size;
 static DWORD test_last_unicast_size;
 static DWORD test_unicast_calls;
+static DWORD test_hud_write_calls;
+static DWORD test_quest_show_calls;
+static DWORD test_quest_hide_calls;
 static char test_last_error[512];
 
 /* ---- configstring stubs (game_import.configstring / GetConfigstring) ---- */
@@ -211,6 +214,36 @@ static HANDLE make_creature_model_data_dbc(LPDWORD size_out) {
     return data;
 }
 
+static HANDLE make_area_table_dbc(LPDWORD size_out) {
+    DWORD size;
+    LPBYTE data = alloc_dbc(1, 21, 32, &size);
+    LPBYTE record = data + 20;
+    LPBYTE strings = record + 21 * sizeof(DWORD);
+    DWORD cursor = 1;
+    DWORD name = add_string(strings, &cursor, "Test Valley");
+
+    putfield(record, 0, 228);
+    putfield(record, 11, name);
+    *size_out = size;
+    return data;
+}
+
+static HANDLE make_area_adt(LPDWORD size_out) {
+    DWORD chunk_size = 0x80;
+    LPBYTE data = calloc(1, 8 + chunk_size);
+    LPBYTE chunk = data + 8;
+
+    memcpy(data, "KNCM", 4);
+    put32(data + 4, chunk_size);
+    put32(chunk + 0x04, 10);
+    put32(chunk + 0x08, 13);
+    put32(chunk + 0x34, 228);
+    putfloat(chunk + 0x68, 133.0f);
+    putfloat(chunk + 0x6c, 233.0f);
+    *size_out = 8 + chunk_size;
+    return data;
+}
+
 static BOOL path_eq(LPCSTR a, LPCSTR b) {
     while (*a && *b) {
         char ca = *a == '/' ? '\\' : *a;
@@ -240,6 +273,12 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
     }
     if (path_eq(filename, "DBFilesClient\\CreatureModelData.dbc")) {
         return make_creature_model_data_dbc(size);
+    }
+    if (path_eq(filename, "DBFilesClient\\AreaTable.dbc")) {
+        return make_area_table_dbc(size);
+    }
+    if (path_eq(filename, "World\\Maps\\Azeroth\\Azeroth_31_31.adt")) {
+        return make_area_adt(size);
     }
     if (size) {
         *size = 0;
@@ -299,7 +338,18 @@ static void test_error(LPCSTR fmt, ...) {
 }
 
 void UI_WriteWowHud(LPEDICT ent) {
-    (void)ent;
+    ASSERT_NOT_NULL(ent);
+    test_hud_write_calls++;
+}
+
+void UI_WriteWowQuestLog(LPEDICT ent) {
+    ASSERT_NOT_NULL(ent);
+    test_quest_show_calls++;
+}
+
+void UI_HideWowQuestLog(LPEDICT ent) {
+    ASSERT_NOT_NULL(ent);
+    test_quest_hide_calls++;
 }
 
 static void test_write_data(void const *data, DWORD size) {
@@ -405,6 +455,9 @@ static void reset_test_state(void) {
     memset(test_last_unicast_buf, 0, sizeof(test_last_unicast_buf));
     test_last_unicast_size = 0;
     test_unicast_calls = 0;
+    test_hud_write_calls = 0;
+    test_quest_show_calls = 0;
+    test_quest_hide_calls = 0;
     memset(test_last_error, 0, sizeof(test_last_error));
     memset(test_configstrings, 0, sizeof(test_configstrings));
 }
@@ -586,8 +639,139 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     }
 }
 
+/* GM exploration speeds manual travel but never bypasses mode, input, or world-bound validation. */
+static void test_wow_gm_mode_accelerates_and_guards_teleport(void) {
+    struct game_export *game = init_game();
+    LPEDICT player;
+    VECTOR3 before;
+    FLOAT normal_step;
+    LPCSTR move_argv[] = { "move", "1", "0", "328", "8.5" };
+    LPCSTR gm_on_argv[] = { "gm", "on" };
+    LPCSTR gm_off_argv[] = { "gm", "off" };
+    LPCSTR gm_invalid_argv[] = { "gm", "invalid" };
+    LPCSTR gm_toggle_argv[] = { "gm" };
+    LPCSTR teleport_argv[] = { "teleport", "100", "200" };
+    LPCSTR teleport_short_argv[] = { "teleport", "100" };
+    LPCSTR teleport_bad_argv[] = { "teleport", "bad", "200" };
+    LPCSTR teleport_nan_argv[] = { "teleport", "nan", "200" };
+    LPCSTR teleport_oob_argv[] = { "teleport", "40000", "200" };
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    game->ClientCommand(player, 5, move_argv);
+    before = player->s.origin;
+    game->RunFrame();
+    normal_step = player->s.origin.x - before.x;
+    ASSERT_EQ_FLOAT(normal_step, WOW_WALK_SPEED * FRAMETIME / 1000.0f, 0.001f);
+
+    game->ClientCommand(player, 2, gm_on_argv);
+    before = player->s.origin;
+    game->RunFrame();
+    ASSERT_EQ_FLOAT(player->s.origin.x - before.x, BZ_WOW_GM_SPEED * FRAMETIME / 1000.0f, 0.001f);
+
+    game->ClientCommand(player, 2, gm_invalid_argv);
+    before = player->s.origin;
+    game->RunFrame();
+    ASSERT_EQ_FLOAT(player->s.origin.x - before.x, BZ_WOW_GM_SPEED * FRAMETIME / 1000.0f, 0.001f);
+
+    game->ClientCommand(player, 1, gm_toggle_argv);
+    before = player->s.origin;
+    game->RunFrame();
+    ASSERT_EQ_FLOAT(player->s.origin.x - before.x, normal_step, 0.001f);
+    game->ClientCommand(player, 2, gm_on_argv);
+    game->ClientCommand(player, 2, gm_off_argv);
+    before = player->s.origin;
+    game->RunFrame();
+    ASSERT_EQ_FLOAT(player->s.origin.x - before.x, normal_step, 0.001f);
+    before = player->s.origin;
+    game->ClientCommand(player, 3, teleport_argv);
+    ASSERT_EQ_FLOAT(player->s.origin.x, before.x, 0.001f);
+    ASSERT_EQ_FLOAT(player->s.origin.y, before.y, 0.001f);
+
+    game->ClientCommand(player, 2, gm_on_argv);
+    game->ClientCommand(player, 2, teleport_short_argv);
+    ASSERT_EQ_FLOAT(player->s.origin.x, before.x, 0.001f);
+    game->ClientCommand(player, 3, teleport_bad_argv);
+    ASSERT_EQ_FLOAT(player->s.origin.x, before.x, 0.001f);
+    game->ClientCommand(player, 3, teleport_nan_argv);
+    ASSERT_EQ_FLOAT(player->s.origin.x, before.x, 0.001f);
+    game->ClientCommand(player, 3, teleport_oob_argv);
+    ASSERT_EQ_FLOAT(player->s.origin.x, before.x, 0.001f);
+    game->ClientCommand(player, 3, teleport_argv);
+    ASSERT_EQ_FLOAT(player->s.origin.x, 100.0f, 0.001f);
+    ASSERT_EQ_FLOAT(player->s.origin.y, 200.0f, 0.001f);
+    ASSERT_EQ_FLOAT(player->s.origin.z, CM_GetHeightAtPoint(100.0f, 200.0f), 0.001f);
+
+    if (game->Shutdown)
+        game->Shutdown();
+}
+
+/* Quest-log visibility is server-owned and refreshes only its dedicated layout layer. */
+static void test_wow_quest_log_commands_toggle_server_ui(void) {
+    struct game_export *game = init_game();
+    LPEDICT player;
+    wowClient_t *wc;
+    LPCSTR open_argv[] = { "questlog", "open" };
+    LPCSTR close_argv[] = { "questlog", "close" };
+    LPCSTR toggle_argv[] = { "questlog", "toggle" };
+    LPCSTR invalid_argv[] = { "questlog", "invalid" };
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    wc = (wowClient_t *)player->client;
+    ASSERT(!wc->quest_log_open);
+
+    game->ClientCommand(player, 2, open_argv);
+    ASSERT(wc->quest_log_open);
+    ASSERT_EQ_INT((int)test_quest_show_calls, 1);
+    ASSERT_EQ_INT((int)test_quest_hide_calls, 0);
+
+    game->ClientCommand(player, 2, invalid_argv);
+    ASSERT(wc->quest_log_open);
+    ASSERT_EQ_INT((int)test_quest_show_calls, 1);
+    ASSERT_EQ_INT((int)test_quest_hide_calls, 0);
+
+    game->ClientCommand(player, 2, toggle_argv);
+    ASSERT(!wc->quest_log_open);
+    ASSERT_EQ_INT((int)test_quest_hide_calls, 1);
+    game->ClientCommand(player, 2, close_argv);
+    ASSERT(!wc->quest_log_open);
+    ASSERT_EQ_INT((int)test_quest_hide_calls, 2);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* MCNK area IDs resolve through the artificial AreaTable and refresh the server-authored header once. */
+static void test_wow_zone_name_tracks_player_area(void) {
+    struct game_export *game = init_game();
+    LPEDICT player;
+    wowClient_t *wc;
+    DWORD initial_hud_writes;
+    LPCSTR gm_on_argv[] = { "gm", "on" };
+    LPCSTR teleport_argv[] = { "teleport", "100", "200" };
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    wc = (wowClient_t *)player->client;
+    ASSERT_STR_EQ(CM_WowAreaNameAtPoint(100.0f, 200.0f), "Test Valley");
+    game->ClientBegin(player);
+    initial_hud_writes = test_hud_write_calls;
+    game->ClientCommand(player, 2, gm_on_argv);
+    game->ClientCommand(player, 3, teleport_argv);
+    game->RunFrame();
+    ASSERT_STR_EQ(wc->zone_name, "Test Valley");
+    ASSERT_EQ_INT((int)test_hud_write_calls, (int)initial_hud_writes + 1);
+    game->RunFrame();
+    ASSERT_EQ_INT((int)test_hud_write_calls, (int)initial_hud_writes + 1);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
 int main(void) {
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
+    RUN_TEST(test_wow_gm_mode_accelerates_and_guards_teleport);
+    RUN_TEST(test_wow_quest_log_commands_toggle_server_ui);
+    RUN_TEST(test_wow_zone_name_tracks_player_area);
     TEST_RESULTS();
 }

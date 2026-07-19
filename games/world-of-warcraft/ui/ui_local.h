@@ -116,6 +116,11 @@ void UIWow_LoadStaticAssets(void);
 void UIWow_UpdateMapBackground(LPCPLAYER ps);
 void UIWow_DrawLoadingScreenC(LPCSTR map, LPCSTR status, FLOAT progress);
 
+/* ui_gm.c */
+void UIWow_GmInit(void);
+void UIWow_GmDraw(void);
+BOOL UIWow_GmMouseEvent(uiMouseEvent_t event, int x, int y, int32_t param);
+
 /* Shared helpers (defined in ui_main.c) */
 void UIWow_EnterGameMode(void);
 void UIWow_EnsureRenderer(void);

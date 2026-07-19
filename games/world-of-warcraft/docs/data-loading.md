@@ -64,6 +64,35 @@ World/Maps/<MapName>/<MapName>_<tile_x>_<tile_y>.adt
 
 The coordinate helper maps world coordinates to the 64x64 ADT grid with `32.0 - coord / 533.333313`.
 
+## Classic Minimap Tiles
+
+The 1.x client stores logical minimap names in `Textures\Minimap\md5translate.trs` and the corresponding BLP files
+under hashed names in `texture.MPQ`. For example:
+
+```text
+Azeroth\map29_31.blp -> textures\Minimap\303d8fede1f036353bfe99b85419eb21.blp
+```
+
+The WoW renderer resolves a 3x3 tile window around the camera through this table. It updates the fractional position
+inside the center ADT every frame, clips the window to the HUD viewport, and loads a new window only when the camera
+crosses an ADT boundary. This keeps the map moving continuously without doing archive I/O every frame. The archive
+path uses the entry's actual `textures\Minimap` casing.
+
+The server reads the area ID from MCNK header offset `0x34` in the active ADT and resolves field 11 in the classic
+21-field `DBFilesClient\AreaTable.dbc` record. That English area name is the minimap header shown to the player.
+
+## GM Exploration Mode
+
+After Azeroth has loaded, click **GM** beside the upper-right minimap. The native exploration panel remains available after
+the archived WoW glue UI shuts down and provides:
+
+- **GM ON (10x)** / **GM OFF** for accelerated WASD movement.
+- **X/Y ± 1 tile** for terrain-grounded jumps by one 533.33-unit ADT tile.
+- The current world X/Y position for orientation.
+
+Teleporting remains server-authoritative and disabled until GM mode is enabled. Destinations outside the world bounds
+are rejected, and OpenWoW samples terrain height at the destination so the player and camera remain grounded.
+
 ## DBC Files
 
 The current code reads classic-style `WDBC` files for targeted lookups rather than full DBC/DB2 coverage.
@@ -111,4 +140,3 @@ build/bin/m2tool \
   -model "Character\\Orc\\Male\\OrcMale.m2" \
   --wow-player-config-only
 ```
-

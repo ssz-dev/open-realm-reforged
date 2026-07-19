@@ -536,6 +536,29 @@ static void test_playerinfo_game_state_switches_to_game_input_without_retargetin
     ASSERT_EQ_FLOAT(cl.viewDef.camerastate[0].origin.y, 256.0f, 0.0001f);
 }
 
+static DWORD active_ui_refresh_count;
+
+static void test_screen_noop(void) {}
+static void test_active_ui_refresh(DWORD time) { (void)time; active_ui_refresh_count++; }
+
+/* In-game overlays still need UI frames after input ownership switches from menu to game. */
+static void test_active_screen_refreshes_ui_in_game_input(void) {
+    test_client_stubs_init();
+    active_ui_refresh_count = 0;
+    cls.state = ca_active;
+    cls.key_dest = key_game;
+    cl.playerstate.client_ui_state = CLIENT_UI_GAME;
+    re.BeginFrame = test_screen_noop;
+    re.EndFrame = test_screen_noop;
+    ui.Refresh = test_active_ui_refresh;
+    scr_initialized = true;
+
+    SCR_UpdateScreen(16);
+
+    ASSERT_EQ_INT((int)active_ui_refresh_count, 1);
+    scr_initialized = false;
+}
+
 static void test_fow_full_message_unpacks_visible_and_explored_planes(void) {
     BYTE buf[64];
     BYTE payload[] = {
@@ -697,6 +720,7 @@ void run_net_tests(void) {
     RUN_TEST(test_unit_ui_parser_preserves_distinct_strings);
     RUN_TEST(test_cursor_splat_message_sets_and_clears_state);
     RUN_TEST(test_playerinfo_game_state_switches_to_game_input_without_retargeting);
+    RUN_TEST(test_active_screen_refreshes_ui_in_game_input);
     RUN_TEST(test_fow_full_message_unpacks_visible_and_explored_planes);
     RUN_TEST(test_fow_row_delta_reconstructs_client_grid);
     RUN_TEST(test_fow_rle_255_continues_current_value);

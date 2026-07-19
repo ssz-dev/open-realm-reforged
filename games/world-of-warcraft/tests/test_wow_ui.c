@@ -43,6 +43,12 @@ static DWORD draw_fill_count;
 static DWORD draw_text_count;
 static DWORD draw_cursor_count;
 static DWORD draw_minimap_count;
+static DWORD draw_lua_status_count;
+static DWORD draw_gm_toggle_count;
+static DWORD draw_gm_position_count;
+static DWORD draw_gm_background_count;
+static RECT last_gm_toggle_rect;
+static RECT last_gm_panel_rect;
 static char last_draw_text[256];
 static char last_server_command[256];
 static char last_cmd_execute_text[256];
@@ -170,6 +176,10 @@ static void test_draw_image(LPCTEXTURE texture, LPCRECT screen, LPCRECT uv, COLO
         draw_inventory_count++;
         last_inventory_width = texture->width;
         last_inventory_height = texture->height;
+    } else if (!strcmp(texture->name, "Interface\\Tooltips\\UI-Tooltip-Background.blp")) {
+        if (screen->w < 0.1f) last_gm_toggle_rect = *screen;
+        if (screen->w > 0.2f) last_gm_panel_rect = *screen;
+        draw_gm_background_count++;
     }
 }
 
@@ -197,10 +207,14 @@ static VECTOR2 test_get_text_size(LPCDRAWTEXT drawText) {
 }
 
 static void test_draw_text(LPCDRAWTEXT drawText) {
+    LPCSTR text = drawText && drawText->text ? drawText->text : "";
+
     draw_text_count++;
-    snprintf(last_draw_text, sizeof(last_draw_text), "%s", drawText && drawText->text ? drawText->text : "");
-    if (drawText && drawText->text && !strcmp(drawText->text, "|"))
-        draw_cursor_count++;
+    snprintf(last_draw_text, sizeof(last_draw_text), "%s", text);
+    if (!strcmp(text, "|")) draw_cursor_count++;
+    if (!strcmp(text, "LuaTester:77:33")) draw_lua_status_count++;
+    if (!strcmp(text, "GM") || !strcmp(text, "GM X")) draw_gm_toggle_count++;
+    if (!strncmp(text, "Position  X ", strlen("Position  X "))) draw_gm_position_count++;
 }
 
 static LPCTEXTURE test_get_texture(DWORD index) {
@@ -259,6 +273,12 @@ static void reset_test_state(void) {
     draw_text_count = 0;
     draw_cursor_count = 0;
     draw_minimap_count = 0;
+    draw_lua_status_count = 0;
+    draw_gm_toggle_count = 0;
+    draw_gm_position_count = 0;
+    draw_gm_background_count = 0;
+    memset(&last_gm_toggle_rect, 0, sizeof(last_gm_toggle_rect));
+    memset(&last_gm_panel_rect, 0, sizeof(last_gm_panel_rect));
     last_panel_width = 0;
     last_panel_height = 0;
     last_inventory_width = 0;
@@ -308,6 +328,24 @@ static uiExport_t init_ui(void) {
 }
 
 extern BOOL UIWow_RunLuaString(LPCSTR name, LPCSTR script);
+extern void UIWow_EnterGameMode(void);
+
+static void shutdown_ui(uiExport_t const *ui) {
+    ui->Shutdown();
+    FOR_LOOP(i, MAX_IMAGES) {
+        if (test_textures[i]) {
+            test_release_texture((LPTEXTURE)test_textures[i]);
+            test_textures[i] = NULL;
+        }
+    }
+    SFileCloseArchive(test_archive);
+    test_archive = NULL;
+}
+
+static void test_click(uiExport_t const *ui, int x, int y) {
+    ASSERT(ui->MouseEvent(UI_MOUSE_DOWN, x, y, 1));
+    ASSERT(ui->MouseEvent(UI_MOUSE_UP, x, y, 1));
+}
 
 static void test_wow_lua_ui_draws_from_generated_mpq(void) {
     uiExport_t ui;
@@ -331,27 +369,68 @@ static void test_wow_lua_ui_draws_from_generated_mpq(void) {
     ASSERT_EQ_INT((int)draw_panel_count, 1);
     ASSERT_EQ_INT((int)draw_inventory_count, 1);
     ASSERT_EQ_INT((int)draw_fill_count, 1);
-    ASSERT_EQ_INT((int)draw_text_count, 1);
+    ASSERT_EQ_INT((int)draw_text_count, 2);
     ASSERT_EQ_INT((int)draw_minimap_count, 1);
+    ASSERT_EQ_INT((int)draw_lua_status_count, 1);
+    ASSERT_EQ_INT((int)draw_gm_toggle_count, 1);
+    ASSERT_EQ_INT((int)draw_gm_background_count, 1);
     ASSERT_EQ_INT((int)last_panel_width, 16);
     ASSERT_EQ_INT((int)last_panel_height, 8);
     ASSERT_EQ_INT((int)last_inventory_width, 8);
     ASSERT_EQ_INT((int)last_inventory_height, 8);
-    ASSERT_STR_EQ(last_draw_text, "LuaTester:77:33");
+    ASSERT_STR_EQ(last_draw_text, "GM");
     ASSERT_STR_EQ(last_server_command, "wow_lua_test 9 33");
 
-    ui.Shutdown();
-    FOR_LOOP(i, MAX_IMAGES) {
-        if (test_textures[i]) {
-            test_release_texture((LPTEXTURE)test_textures[i]);
-            test_textures[i] = NULL;
-        }
-    }
-    SFileCloseArchive(test_archive);
-    test_archive = NULL;
+    shutdown_ui(&ui);
+}
+
+/* The native overlay keeps every GM action reachable when the archived Lua HUD is disabled in-game. */
+static void test_wow_gm_menu_opens_and_sends_exploration_commands(void) {
+    uiExport_t ui;
+    RECT minimap = { 879.0f / 1024.0f, 8.0f / 768.0f, 128.0f / 1024.0f, 128.0f / 768.0f };
+
+    reset_test_state();
+    ASSERT(SFileOpenArchive(TEST_WOW_MPQ, 0, 0, &test_archive));
+    ui = init_ui();
+    ASSERT_NOT_NULL(ui.MouseEvent);
+    UIWow_EnterGameMode();
+    ui.Refresh(33);
+    ASSERT_EQ_INT((int)draw_fill_count, 0);
+    ASSERT_EQ_INT((int)draw_text_count, 1);
+    ASSERT_EQ_INT((int)draw_gm_toggle_count, 1);
+    ASSERT_EQ_INT((int)draw_gm_background_count, 1);
+    ASSERT(last_gm_toggle_rect.x + last_gm_toggle_rect.w < minimap.x);
+
+    test_click(&ui, 829, 35);
+    ui.Refresh(66);
+    ASSERT_EQ_INT((int)draw_gm_toggle_count, 2);
+    ASSERT_EQ_INT((int)draw_gm_position_count, 1);
+    ASSERT_EQ_INT((int)draw_gm_background_count, 9);
+    ASSERT(last_gm_panel_rect.x + last_gm_panel_rect.w < minimap.x);
+
+    test_click(&ui, 650, 129);
+    ASSERT_STR_EQ(last_server_command, "gm on");
+    test_ps.origin = MAKE(VECTOR2, 100.0f, 200.0f);
+    test_click(&ui, 788, 186);
+    ASSERT_STR_EQ(last_server_command, "teleport 633.333 200.000");
+    test_click(&ui, 650, 244);
+    ASSERT_STR_EQ(last_server_command, "teleport 100.000 -333.333");
+    test_click(&ui, 788, 129);
+    ASSERT_STR_EQ(last_server_command, "gm off");
+
+    last_server_command[0] = '\0';
+    ASSERT(ui.MouseEvent(UI_MOUSE_DOWN, 650, 129, 1));
+    ASSERT(ui.MouseEvent(UI_MOUSE_UP, 500, 500, 1));
+    ASSERT_STR_EQ(last_server_command, "");
+    test_click(&ui, 829, 35);
+    ASSERT(!ui.MouseEvent(UI_MOUSE_DOWN, 650, 129, 1));
+    ASSERT(!ui.MouseEvent(UI_MOUSE_UP, 650, 129, 1));
+
+    shutdown_ui(&ui);
 }
 
 int main(void) {
     RUN_TEST(test_wow_lua_ui_draws_from_generated_mpq);
+    RUN_TEST(test_wow_gm_menu_opens_and_sends_exploration_commands);
     TEST_RESULTS();
 }

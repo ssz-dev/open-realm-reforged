@@ -19,6 +19,7 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 - Basic creature/entity scaffolding and model registration paths.
 - Loading-screen UI with WoW textures, fonts, loading title/status text, and progress display.
 - DBC helpers for selected loading-screen and map metadata lookup.
+- Server-authored in-game HUD with a live ADT minimap, GM exploration controls, and an interactive empty quest log.
 - Build integration through `make openwow`.
 
 ## Partial
@@ -30,7 +31,7 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 
 ## Not There Yet
 
-- MMO gameplay, combat, quests, spells, inventory, persistence, networking, or server world rules.
+- Full MMO quest gameplay, quest persistence, networking, or server world rules.
 - Full DBC/DB2 coverage.
 - Full UI implementation beyond the loading-screen style shell.
 - Complete WMO, doodad, creature, particle, and animation fidelity.
@@ -73,6 +74,7 @@ What the World of Warcraft target currently knows how to load and render.
 - [Grass Rendering System](docs/grass-rendering-system.md): terrain-advertent grass rendering.
 - [References](docs/references.md): public schema references and local source/tool entry points.
 - [Sounds](docs/sounds.md)
+- [In-Game UI](docs/ui.md): server-authored HUD layers, minimap placement, GM controls, and quest-log commands.
 
 ### Short Version
 

@@ -25,6 +25,7 @@ static struct {
     FLOAT yaw;
     FLOAT pitch;
     FLOAT distance;
+    BOOL gm;
 } wow_move = {
     .pitch = 328.0f,
     .distance = 8.5f,
@@ -661,12 +662,16 @@ static void Wow_UpdateCamera(LPEDICT ent) {
 
 static void Wow_UpdatePlayerHud(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    wowClient_t *wc;
+    LPCMAPINFO mapinfo;
+    LPCSTR zone;
     LPPLAYER ps;
 
     if (!ent || !ent->client || !local) {
         return;
     }
     ps = &ent->client->ps;
+    wc = (wowClient_t *)ent->client;
     ps->stats[WOW_STAT_HEALTH] = (USHORT)local->health;
     ps->stats[WOW_STAT_HEALTH_MAX] = 100;
     ps->stats[WOW_STAT_POWER] = 42;
@@ -675,6 +680,16 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
     ps->stats[WOW_STAT_XP] = 120;
     ps->stats[WOW_STAT_XP_MAX] = 400;
     ps->stats[WOW_STAT_COPPER] = 1234;
+    zone = CM_WowAreaNameAtPoint(ent->s.origin.x, ent->s.origin.y);
+    mapinfo = CM_GetMapInfo();
+    if (!zone || !*zone)
+        zone = mapinfo && mapinfo->loadingScreenTitle && *mapinfo->loadingScreenTitle
+            ? mapinfo->loadingScreenTitle : "Azeroth";
+    if (strcmp(wc->zone_name, zone)) {
+        snprintf(wc->zone_name, sizeof(wc->zone_name), "%s", zone);
+        /* Zone labels are server-authored, so refresh the HUD only on an actual area transition. */
+        if (ps->client_ui_state == CLIENT_UI_GAME) UI_WriteWowHud(ent);
+    }
 }
 
 static void Wow_WriteHudIcon(wowHudIcon_t const *icon, DWORD slot) {
@@ -957,6 +972,7 @@ static void Wow_Init(void) {
     memset(wow_edicts, 0, sizeof(wow_edicts));
     memset(wow_entity_locals, 0, sizeof(wow_entity_locals));
     memset(wow_clients, 0, sizeof(wow_clients));
+    wow_move.gm = false;
 
     globals.edicts = wow_edicts;
     globals.max_edicts = WOW_MAX_EDICTS;
@@ -1138,7 +1154,7 @@ static void Wow_RunFrame(void) {
     moving = len > 0.001f;
     ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
     if (moving) {
-        FLOAT step = WOW_WALK_SPEED * ((FLOAT)FRAMETIME / 1000.0f) / len;
+        FLOAT step = (wow_move.gm ? BZ_WOW_GM_SPEED : WOW_WALK_SPEED) * ((FLOAT)FRAMETIME / 1000.0f) / len;
         ent->s.origin.x += dir.x * step;
         ent->s.origin.y += dir.y * step;
     }
@@ -1212,6 +1228,69 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
         wow_move.yaw = (FLOAT)atof(argv[2]);
         wow_move.pitch = Wow_Clamp((FLOAT)atof(argv[3]), WOW_CAMERA_MIN_PITCH, WOW_CAMERA_MAX_PITCH);
         wow_move.distance = Wow_Clamp((FLOAT)atof(argv[4]), WOW_CAMERA_MIN_DISTANCE, WOW_CAMERA_MAX_DISTANCE);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "gm")) {
+        BOOL enabled;
+
+        if (argc < 2 || !strcasecmp(argv[1], "toggle"))
+            enabled = !wow_move.gm;
+        else if (!strcasecmp(argv[1], "on"))
+            enabled = true;
+        else if (!strcasecmp(argv[1], "off"))
+            enabled = false;
+        else {
+            fprintf(stderr, "OpenWoW GM: usage: cmd gm [on|off|toggle]\n");
+            return;
+        }
+        wow_move.gm = enabled;
+        fprintf(stderr, "OpenWoW GM: %s (movement speed %.0f)\n",
+                enabled ? "enabled" : "disabled", enabled ? BZ_WOW_GM_SPEED : WOW_WALK_SPEED);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "questlog")) {
+        wowClient_t *wc = (wowClient_t *)ent->client;
+
+        if (argc < 2 || !strcasecmp(argv[1], "toggle"))
+            wc->quest_log_open = !wc->quest_log_open;
+        else if (!strcasecmp(argv[1], "open"))
+            wc->quest_log_open = true;
+        else if (!strcasecmp(argv[1], "close"))
+            wc->quest_log_open = false;
+        else {
+            fprintf(stderr, "OpenWoW Quest Log: usage: questlog [open|close|toggle]\n");
+            return;
+        }
+        if (wc->quest_log_open) UI_WriteWowQuestLog(ent);
+        else UI_HideWowQuestLog(ent);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "teleport")) {
+        char *x_end;
+        char *y_end;
+        VECTOR2 position;
+        BOX2 bounds;
+
+        if (!wow_move.gm) {
+            fprintf(stderr, "OpenWoW GM: teleport requires 'cmd gm on'\n");
+            return;
+        }
+        if (argc != 3) {
+            fprintf(stderr, "OpenWoW GM: usage: cmd teleport <x> <y>\n");
+            return;
+        }
+        position = (VECTOR2){ strtof(argv[1], &x_end), strtof(argv[2], &y_end) };
+        bounds = CM_GetWorldBounds();
+        if (x_end == argv[1] || y_end == argv[2] || *x_end || *y_end ||
+            !isfinite(position.x) || !isfinite(position.y)) {
+            fprintf(stderr, "OpenWoW GM: usage: cmd teleport <x> <y>\n");
+            return;
+        }
+        if (!Box2_containsPoint(&bounds, &position)) {
+            fprintf(stderr, "OpenWoW GM: teleport %.2f %.2f is outside world bounds\n",
+                    (double)position.x, (double)position.y);
+            return;
+        }
+        /* GM teleport still grounds the player so the existing 2D camera contract remains authoritative. */
+        ent->s.origin = (VECTOR3){ position.x, position.y, Wow_TerrainHeight(position.x, position.y) };
+        ent->s.origin2 = position;
+        Wow_UpdateCamera(ent);
+        fprintf(stderr, "OpenWoW GM: teleported to %.2f %.2f %.2f\n",
+                (double)ent->s.origin.x, (double)ent->s.origin.y, (double)ent->s.origin.z);
     } else if (argc >= 1 && (!strcasecmp(argv[0], "select"))) {
         LPEDICT target = argc >= 2
             ? Wow_EdictByNumber((DWORD)strtoul(argv[1], NULL, 10))
@@ -1287,6 +1366,7 @@ static void Wow_ClientBegin(LPEDICT ent) {
     ent->client->ps.client_ui_state = CLIENT_UI_GAME;
     Wow_SendPlayerUi(ent);
     UI_WriteWowHud(ent);
+    UI_HideWowQuestLog(ent);
 }
 
 struct game_export *GetGameAPI(struct game_import *import) {

@@ -193,6 +193,12 @@ struct render_globals {
     sheetRow_t *sheet[SHEET_COUNT];
     size2_t drawableSize;
     LPTEXTURE minimap;
+    struct {
+        LPTEXTURE tiles[3][3];
+        VECTOR2 center;
+        FLOAT span;
+        BOOL active;
+    } minimap_tiles;
     RECT minimapRect;   /* last UI-space rect the minimap was drawn at */
     BOOL hasMinimap;
 };

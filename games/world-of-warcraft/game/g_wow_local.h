@@ -20,6 +20,7 @@
 #define WOW_MOVE_LEFT 4
 #define WOW_MOVE_RIGHT 8
 #define WOW_WALK_SPEED 7.0f
+#define BZ_WOW_GM_SPEED 70.0f
 #define WOW_MELEE_RANGE 5.0f
 #define WOW_CAMERA_MIN_PITCH 300.0f
 #define WOW_CAMERA_MAX_PITCH 350.0f
@@ -79,8 +80,10 @@ typedef struct {
 typedef struct {
     struct client_s client;
     UINAME name;
+    char zone_name[128];
     wowHudIcon_t inventory[WOW_UI_INVENTORY_SLOTS];
     wowHudIcon_t actions[WOW_UI_ACTION_SLOTS];
+    BOOL quest_log_open;
 } wowClient_t;
 
 extern struct game_import gi;
@@ -112,6 +115,7 @@ BOOL Wow_FindDbcRecord(LPCSTR filename,
                        BYTE const **strings_out,
                        DWORD *string_size_out);
 FLOAT Wow_TerrainHeight(FLOAT x, FLOAT y);
+LPCSTR CM_WowAreaNameAtPoint(FLOAT x, FLOAT y);
 DWORD Wow_EntityIndex(LPCEDICT ent);
 wowEntityLocal_t *Wow_EntityLocal(LPCEDICT ent);
 LPCANIMATION Wow_SetEntityAnimation(LPEDICT ent, LPCSTR animation_name);
@@ -134,6 +138,8 @@ void Wow_AIRunFrame(LPEDICT ent);
 void Wow_SpawnAmbientCreatures(LPCVECTOR2 origin);
 void Wow_RunCreatureFrame(LPEDICT ent);
 void UI_WriteWowHud(LPEDICT ent);
+void UI_WriteWowQuestLog(LPEDICT ent);
+void UI_HideWowQuestLog(LPEDICT ent);
 
 /* Ability/projectile system */
 DWORD      Wow_FireboltModel(void);

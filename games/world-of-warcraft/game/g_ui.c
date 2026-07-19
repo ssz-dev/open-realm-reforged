@@ -17,9 +17,17 @@
 #define PH(h) ((h) / VH)
 #define HUD_FONT_SIZE 10
 
+typedef struct {
+    LPCSTR path;
+    LPCSTR tooltip;
+    LPCSTR onclick;
+    RECT rect;
+} wowHudButton_t;
+
 static DWORD ui_next_frame_number;
 
-static void UI_SetFramePoint(uiFramePoint_t *point, uiFramePointPos_t target, DWORD relative, FLOAT offset, BOOL y_axis) {
+static void UI_SetFramePoint(uiFramePoint_t *point, uiFramePointPos_t target, DWORD relative,
+                             FLOAT offset, BOOL y_axis) {
     point->used = 1;
     point->targetPos = target;
     point->relativeTo = (BYTE)relative;
@@ -47,7 +55,8 @@ static void UI_WriteProxyFrame(LPUIFRAME frame, HANDLE data, DWORD data_size) {
     gi.Write(PF_UIFRAME, frame);
 }
 
-static void UI_WriteTextFrame(FLOAT x, FLOAT y, FLOAT w, FLOAT h, LPCSTR text, COLOR32 color, uiFontJustificationH_t align) {
+static void UI_WriteTextFrame(FLOAT x, FLOAT y, FLOAT w, FLOAT h, LPCSTR text,
+                              COLOR32 color, uiFontJustificationH_t align) {
     uiFrame_t frame;
     uiLabel_t label;
 
@@ -85,6 +94,25 @@ static void UI_WriteImage(LPCSTR path, FLOAT x, FLOAT y, FLOAT w, FLOAT h, COLOR
     UI_WriteImageUV(path, x, y, w, h, 0.0f, 1.0f, 0.0f, 1.0f, color);
 }
 
+/* Clickable HUD art keeps the server command on the same frame used for hit testing. */
+static void UI_WriteImageButton(wowHudButton_t const *button) {
+    uiFrame_t frame;
+    uiTextureUV_t uv;
+
+    memset(&frame, 0, sizeof(frame));
+    memset(&uv, 0, sizeof(uv));
+    frame.flags.type = FT_TEXTURE;
+    frame.color = COLOR32_WHITE;
+    frame.tex.index = gi.ImageIndex(button->path);
+    frame.tooltip = button->tooltip;
+    frame.onclick = button->onclick;
+    uv.r = uv.b = 1.0f;
+    uv.color = COLOR32_WHITE;
+    uv.alphamode = BLEND_MODE_ALPHAKEY;
+    UI_SetFrameRect(&frame, button->rect.x, button->rect.y, button->rect.w, button->rect.h);
+    UI_WriteProxyFrame(&frame, &uv, sizeof(uv));
+}
+
 /* Solid-color quad via a null texture slot */
 static void UI_WriteColorRect(FLOAT x, FLOAT y, FLOAT w, FLOAT h, COLOR32 color) {
     uiFrame_t frame;
@@ -111,19 +139,20 @@ static void UI_WriteColorBar(FLOAT x, FLOAT y, FLOAT w, FLOAT h,
         UI_WriteColorRect(x + PW(2), y + PH(2), (w - PW(4)) * p, h - PH(4), fill_color);
 }
 
-/* Minimap: border image + actual minimap viewport */
-static void UI_WriteMinimapFrames(void) {
+/* Minimap: clean square viewport with a server-authored zone header. */
+static void UI_WriteMinimapFrames(LPCSTR zone_name) {
     uiFrame_t minimap;
 
-    /* Minimap border overlay */
-    UI_WriteImage("Interface\\Minimap\\UI-Minimap-Border.blp",
-                  PX(879), PY(8), PW(128), PH(128), COLOR32_WHITE);
-
+    UI_WriteColorRect(PX(879), PY(8), PW(128), PH(22), MAKE(COLOR32, 8, 12, 18, 220));
+    UI_WriteTextFrame(PX(883), PY(11), PW(120), PH(16),
+                      zone_name && *zone_name ? zone_name : "Azeroth",
+                      MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYCENTER);
+    UI_WriteColorRect(PX(879), PY(30), PW(128), PH(128), MAKE(COLOR32, 5, 8, 12, 245));
     /* Minimap viewport — FT_MINIMAP; client calls DrawMinimap() for this rect. */
     memset(&minimap, 0, sizeof(minimap));
     minimap.flags.type = FT_MINIMAP;
     minimap.color = COLOR32_WHITE;
-    UI_SetFrameRect(&minimap, PX(896), PY(25), PW(91), PH(91));
+    UI_SetFrameRect(&minimap, PX(879), PY(30), PW(128), PH(128));
     UI_WriteProxyFrame(&minimap, NULL, 0);
 }
 
@@ -217,8 +246,64 @@ static void UI_WriteTargetingFrame(LPEDICT ent) {
                      MAKE(COLOR32, 26, 82, 210, 235));
 }
 
+static void UI_WriteStart(DWORD layer) {
+    gi.Write(PF_BYTE, &(LONG){svc_layout});
+    gi.Write(PF_BYTE, &(LONG){layer});
+    ui_next_frame_number = 1;
+}
+
+static void UI_WriteEnd(LPEDICT ent) {
+    gi.Write(PF_LONG, &(LONG){0});
+    gi.Write(PF_SHORT, &(LONG){0});
+    gi.unicast(ent);
+}
+
+/* The original 1.12 client composes the 384x512 quest log from four archived textures. */
+void UI_WriteWowQuestLog(LPEDICT ent) {
+    static wowHudButton_t const close_button = {
+        .path = "Interface\\Buttons\\UI-Panel-MinimizeButton-Up.blp",
+        .tooltip = "Close Quest Log",
+        .onclick = "questlog close",
+        .rect = { PX(323), PY(112), PW(32), PH(32) },
+    };
+
+    if (!ent || !ent->client) return;
+    UI_WriteStart(LAYER_QUESTDIALOG);
+    UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-BookIcon.blp",
+                  PX(4), PY(108), PW(64), PH(64), COLOR32_WHITE);
+    UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-TopLeft.blp",
+                  PX(0), PY(104), PW(256), PH(256), COLOR32_WHITE);
+    UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-TopRight.blp",
+                  PX(256), PY(104), PW(128), PH(256), COLOR32_WHITE);
+    UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-BotLeft.blp",
+                  PX(0), PY(360), PW(256), PH(256), COLOR32_WHITE);
+    UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-BotRight.blp",
+                  PX(256), PY(360), PW(128), PH(256), COLOR32_WHITE);
+    UI_WriteTextFrame(PX(42), PY(119), PW(300), PH(16), "QUEST LOG",
+                      MAKE(COLOR32, 255, 225, 170, 255), FONT_JUSTIFYCENTER);
+    UI_WriteTextFrame(PX(70), PY(174), PW(250), PH(20), "No active quests",
+                      MAKE(COLOR32, 255, 225, 170, 255), FONT_JUSTIFYCENTER);
+    UI_WriteTextFrame(PX(45), PY(205), PW(285), PH(48),
+                      "New quests will appear here when quest gameplay is available.",
+                      MAKE(COLOR32, 225, 210, 175, 255), FONT_JUSTIFYCENTER);
+    UI_WriteImageButton(&close_button);
+    UI_WriteEnd(ent);
+}
+
+void UI_HideWowQuestLog(LPEDICT ent) {
+    if (!ent || !ent->client) return;
+    UI_WriteStart(LAYER_QUESTDIALOG);
+    UI_WriteEnd(ent);
+}
+
 /* Build and unicast the WoW HUD layer for a player */
 void UI_WriteWowHud(LPEDICT ent) {
+    static wowHudButton_t const quest_button = {
+        .path = "Interface\\QuestFrame\\UI-QuestLog-BookIcon.blp",
+        .tooltip = "Open Quest Log",
+        .onclick = "questlog toggle",
+        .rect = { PX(879), PY(170), PW(40), PH(40) },
+    };
     LPPLAYER ps;
     wowClient_t *wc;
     char copper_buf[64];
@@ -228,9 +313,7 @@ void UI_WriteWowHud(LPEDICT ent) {
     ps = &ent->client->ps;
     wc = (wowClient_t *)ent->client;
 
-    gi.Write(PF_BYTE, &(LONG){svc_layout});
-    gi.Write(PF_BYTE, &(LONG){LAYER_CONSOLE});
-    ui_next_frame_number = 1;
+    UI_WriteStart(LAYER_CONSOLE);
 
     /* Character/targeting frame (portrait area top-left) */
     UI_WriteTargetingFrame(ent);
@@ -252,21 +335,18 @@ void UI_WriteWowHud(LPEDICT ent) {
     UI_WriteImage("Interface\\Buttons\\Button-Backpack-Up.blp",
                   PX(981), PY(729), PW(37), PH(37), COLOR32_WHITE);
 
-    /* Minimap border + viewport */
-    UI_WriteMinimapFrames();
+    /* Clean minimap + live zone header */
+    UI_WriteMinimapFrames(wc->zone_name);
 
-    /* Quest log icon + label */
-    UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-BookIcon.blp",
-                  PX(840), PY(162), PW(32), PH(32), COLOR32_WHITE);
-    UI_WriteTextFrame(PX(876), PY(164), PW(110), PH(20),
-                      "Quests", MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
+    /* Quest control sits below the fixed top-right minimap and opens its own layer. */
+    UI_WriteImageButton(&quest_button);
+    UI_WriteTextFrame(PX(919), PY(180), PW(88), PH(20),
+                      "Quest Log", MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
 
     /* Copper display */
     snprintf(copper_buf, sizeof(copper_buf), "Copper %d", (int)ps->stats[WOW_STAT_COPPER]);
     UI_WriteTextFrame(PX(816), PY(704), PW(150), PH(20),
                       copper_buf, MAKE(COLOR32, 255, 210, 100, 255), FONT_JUSTIFYRIGHT);
 
-    gi.Write(PF_LONG, &(LONG){0});
-    gi.Write(PF_SHORT, &(LONG){0});
-    gi.unicast(ent);
+    UI_WriteEnd(ent);
 }

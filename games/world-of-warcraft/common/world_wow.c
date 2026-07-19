@@ -8,6 +8,7 @@
 
 typedef struct {
     BOOL    has_heights;
+    DWORD   area_id;
     VECTOR3 position;
     float   heights[CM_WOW_MCVT_COUNT];
 } cmWowChunkHeight_t;
@@ -169,6 +170,7 @@ static void CM_WowLoadAdtHeights(int tile_x, int tile_y) {
 
             if (index_x < 16 && index_y < 16) {
                 height_chunk = &cm_wow_height_cache.chunks[index_y][index_x];
+                height_chunk->area_id = CM_WowRead32(chunk + 0x34);
                 memcpy(&height_chunk->position, chunk + 0x68, sizeof(height_chunk->position));
             }
 
@@ -282,6 +284,65 @@ static BOOL CM_WowValidDbc(BYTE const *data, DWORD size,
         20 + *records * *record_size + *string_size > size)
         return false;
     return true;
+}
+
+static DWORD CM_WowAreaIdAtPoint(FLOAT sx, FLOAT sy) {
+    int tile_x = CM_WowAdtIndexForWorldCoord(sy);
+    int tile_y = CM_WowAdtIndexForWorldCoord(sx);
+
+    if (tile_x < 0 || tile_x >= 64 || tile_y < 0 || tile_y >= 64) return 0;
+    if (!cm_wow_height_cache.loaded ||
+        cm_wow_height_cache.tile_x != tile_x ||
+        cm_wow_height_cache.tile_y != tile_y)
+        CM_WowLoadAdtHeights(tile_x, tile_y);
+    FOR_LOOP(row, 16) {
+        FOR_LOOP(col, 16) {
+            cmWowChunkHeight_t const *chunk = &cm_wow_height_cache.chunks[row][col];
+
+            if (sx <= chunk->position.x + 0.001f &&
+                sx >= chunk->position.x - 8.0f * CM_WOW_ADT_UNIT_SIZE - 0.001f &&
+                sy <= chunk->position.y + 0.001f &&
+                sy >= chunk->position.y - 8.0f * CM_WOW_ADT_UNIT_SIZE - 0.001f)
+                return chunk->area_id;
+        }
+    }
+    return 0;
+}
+
+/* Resolve the MCNK area ID through the English name field in classic AreaTable.dbc. */
+LPCSTR CM_WowAreaNameAtPoint(FLOAT sx, FLOAT sy) {
+    static DWORD cached_id = ~0u;
+    static char cached_name[128];
+    DWORD area_id = CM_WowAreaIdAtPoint(sx, sy);
+    LPBYTE data;
+    DWORD size = 0, records, fields, record_size, string_size;
+    BYTE const *records_base, *strings_base;
+
+    if (!area_id) return NULL;
+    if (area_id == cached_id) return cached_name[0] ? cached_name : NULL;
+    cached_id = area_id;
+    cached_name[0] = '\0';
+    data = FS_ReadFile("DBFilesClient\\AreaTable.dbc", &size);
+    if (!CM_WowValidDbc(data, size, &records, &fields, &record_size, &string_size) || fields <= 11) {
+        fprintf(stderr, "CM_WowAreaNameAtPoint: invalid DBFilesClient\\AreaTable.dbc\n");
+        SAFE_DELETE(data, FS_FreeFile);
+        return NULL;
+    }
+    records_base = data + 20;
+    strings_base = records_base + records * record_size;
+    FOR_LOOP(i, records) {
+        BYTE const *record = records_base + i * record_size;
+        LPCSTR name;
+
+        if (CM_WowRead32(record) != area_id) continue;
+        name = CM_WowDbcString(strings_base, string_size, CM_WowRead32(record + 11 * sizeof(DWORD)));
+        if (name) snprintf(cached_name, sizeof(cached_name), "%s", name);
+        FS_FreeFile(data);
+        return cached_name[0] ? cached_name : NULL;
+    }
+    fprintf(stderr, "CM_WowAreaNameAtPoint: AreaTable.dbc has no area id %u\n", (unsigned)area_id);
+    FS_FreeFile(data);
+    return NULL;
 }
 
 static BOOL CM_WowFindMapId(LPCSTR map_name, DWORD *map_id) {

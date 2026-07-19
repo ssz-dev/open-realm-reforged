@@ -32,12 +32,11 @@ Renderer choices:
 ```c
 void CL_Frame(DWORD msec) {
     cl.time += msec;
-    ui.Refresh(msec);   // 1. update active client-side UI screen
-    CL_Input();         // 2. sample keyboard / mouse
-    CL_ReadPackets();   // 3. apply incoming server messages
-    CL_SendCommand();   // 4. execute commands and forward to server
-    CL_PrepRefresh();   // 5. build scene for the renderer
-    SCR_UpdateScreen(); // 6. draw world, UI, and console
+    CL_Input();         // 1. sample keyboard / mouse
+    CL_ReadPackets();   // 2. apply incoming server messages
+    CL_SendCommand();   // 3. execute commands and forward to server
+    CL_PrepRefresh();   // 4. build scene for the renderer
+    SCR_UpdateScreen(); // 5. draw world, UI, and console
 }
 ```
 
@@ -89,9 +88,12 @@ Calls into the renderer API:
 
 1. `R_BeginFrame` — clear colour/depth, update matrices.
 2. `R_RenderFrame` — draw all entities, terrain, water, particles.
-3. `ui.DrawFrame` — draw the active client-side UI screen.
+3. `ui.Refresh` — update/draw the selected game's UI module.
 4. Console overlay draws debug text.
 5. `R_EndFrame` — present the frame or flush the stdout renderer.
+
+`ui.Refresh` runs for active gameplay even when input belongs to `key_game`; game-specific UI modules decide whether
+to draw an in-game overlay. Gating this call on `key_menu` makes native HUD layers unreachable after gameplay starts.
 
 With `r_module=stdout`, the same calls produce text lines such as `draw_image`, `draw_text`, and `draw_portrait` instead of pixels. This is useful for scriptable UI checks:
 

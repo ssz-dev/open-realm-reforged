@@ -17,3 +17,6 @@ War3.mpq
 share/characters.xml
 # Added by code-review-graph
 .code-review-graph/
+
+# Local OpenWoW runtime assets
+/data/
