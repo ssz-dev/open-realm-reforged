@@ -22,17 +22,22 @@ Idle -> Aggro -> Chase -> Attack
 Attack -> Dead -> Respawn -> Idle
 ```
 
-- Idle creatures acquire the player within `BZ_WOW_CREATURE_AGGRO_RANGE`.
+- Idle creatures acquire the player within `BZ_WOW_CREATURE_AGGRO_RANGE` only
+  when the central world sweep reports clear sight.
 - Player melee and projectile damage use `Wow_DealDamage` and assign the projectile caster as the aggro owner.
-- Chase stops at `WOW_MELEE_RANGE`; damage occurs once at the animation damage point, followed by the existing
-  backswing.
+- Chase uses deterministic local obstacle probes and a retained steering direction; repeated failure recovers toward
+  a distinct last-valid checkpoint before Evade.
+- Chase stops at `WOW_MELEE_RANGE` only with clear sight. Melee rechecks range and sight at the animation damage point,
+  then enters the existing backswing.
+- Homing projectiles sweep their complete frame segment against WMO collision. A wall hit removes the projectile
+  before damage, kill credit, XP, loot, or quest progress.
 - A player or creature beyond `BZ_WOW_CREATURE_LEASH_RANGE` from the spawn point triggers Evade.
 - Evade clears the enemy immediately, returns to `home`, and regenerates one health per
   `BZ_WOW_CREATURE_REGEN_TIME`.
 - Death clears selections, attackers, and in-flight projectiles that reference the victim. The creature keeps its edict
   but temporarily loses `SVF_MONSTER`, so it is neither a living target nor a dynamic obstacle.
 - Respawn restores the same edict at `home`, resets all combat timers and references, restores full health, and raises
-  `SVF_MONSTER` again.
+  `SVF_MONSTER` again. It also clears all transient obstacle navigation state.
 
 Tests use artificial entities and animations in `tests/test_wow_combat.c`; no files from `data/` are fixtures.
 

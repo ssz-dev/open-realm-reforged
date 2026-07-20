@@ -213,6 +213,7 @@ static void Wow_MonsterStart(LPEDICT ent,
     ent->pain = Wow_AIPain;
     ent->s.flags = EF_GROUND_ANCHOR;
     ent->s.angle = (FLOAT)DEG2RAD(yaw);
+    Wow_AIResetNavigation(ent);
     Wow_SyncEntityVitals(ent);
     if (patrol_radius > 0.0f) {
         Wow_SetWalkMove(ent);

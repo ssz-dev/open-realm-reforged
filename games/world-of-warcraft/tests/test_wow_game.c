@@ -894,13 +894,97 @@ static void test_wow_wmo_world_query_handles_floors_ramp_walls_and_door(void) {
         creature_local->home = (VECTOR2){ creature_start.x, creature_start.y };
         creature_local->enemy = player; creature_local->ai_state = WOW_AI_CHASE;
         ASSERT(Wow_PlaceEntityOnGround(creature, &creature_start));
-        FOR_LOOP(i, 30) Wow_AIRunFrame(creature);
-        ASSERT(creature->s.origin.x > 109.0f && creature->s.origin.x < 109.6f);
-        ASSERT_EQ_FLOAT(creature->s.origin.y, 190.0f, 0.01f);
+        Wow_AIResetNavigation(creature);
+        FOR_LOOP(i, 70) Wow_AIRunFrame(creature);
+        ASSERT(creature->s.origin.x > 110.5f);
+        ASSERT(Wow_Distance2(&creature->s.origin2, &player->s.origin2) <= WOW_MELEE_RANGE + 0.01f);
         ASSERT(creature_local->grounded);
+        creature_start = creature->s.origin;
         ASSERT(!Wow_PlaceEntityOnGround(creature, &blocked_respawn));
-        ASSERT(creature->s.origin.x < 109.6f);
+        ASSERT_EQ_FLOAT(creature->s.origin.x, creature_start.x, 0.001f);
+        ASSERT_EQ_FLOAT(creature->s.origin.y, creature_start.y, 0.001f);
     }
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* One artificial WMO wall blocks sight, melee, and projectiles through their shared collision pipeline. */
+static void test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards(void) {
+    struct game_export *game = init_game();
+    LPEDICT player = &wow_edicts[0];
+    LPEDICT creature;
+    LPEDICT projectile;
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *creature_local;
+    wowClient_t *client = &wow_clients[0];
+    VECTOR3 player_start = { 100.0f, 190.0f, 22.0f };
+    VECTOR3 creature_start = { 120.0f, 190.0f, 22.0f };
+
+    test_wmo_fixture_enabled = true;
+    test_wmo_bsp_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    memset(player, 0, sizeof(*player)); memset(player_local, 0, sizeof(*player_local));
+    memset(client, 0, sizeof(*client));
+    player->inuse = true; player->s.number = 0; player->s.model = 1; player->s.radius = 1.0f;
+    player->client = &client->client; player->attack = Wow_AIAttack; player->pain = Wow_AIPain;
+    player_local->kind = WOW_ENTITY_PLAYER; player_local->health = player_local->max_health = 100;
+    player_local->max_power = BZ_WOW_PLAYER_MAX_POWER; player_local->level = 1;
+    ASSERT(Wow_PlaceEntityOnGround(player, &player_start));
+
+    creature = Wow_Spawn();
+    ASSERT_NOT_NULL(creature);
+    creature_local = Wow_EntityLocal(creature);
+    creature->s.model = 1; creature->s.radius = 0.5f;
+    creature_local->kind = WOW_ENTITY_CREATURE; creature_local->hostile = true;
+    creature_local->health = creature_local->max_health = 1;
+    creature_local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    creature_local->home = (VECTOR2){ creature_start.x, creature_start.y };
+    creature_local->ai_state = WOW_AI_IDLE;
+    ASSERT(Wow_PlaceEntityOnGround(creature, &creature_start));
+    Wow_AIResetNavigation(creature);
+
+    ASSERT(!Wow_HasLineOfSight(creature, player));
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_IDLE);
+    ASSERT_NULL(creature_local->enemy);
+    player->s.origin.x = player->s.origin2.x = 117.0f;
+    ASSERT(Wow_HasLineOfSight(creature, player));
+    Wow_AIRunFrame(creature);
+    ASSERT(creature_local->enemy == player);
+
+    player->s.origin.x = player->s.origin2.x = 108.0f;
+    creature->s.origin.x = creature->s.origin2.x = 112.0f;
+    creature_local->enemy = NULL; creature_local->ai_state = WOW_AI_IDLE;
+    player_local->enemy = creature;
+    player->client->ps.selected_entity = creature->s.number;
+    ASSERT(!Wow_UseAbility(player, WOW_ABILITY_STRIKE));
+    ASSERT_EQ_INT((int)player_local->attack_damage_time, 0);
+    ASSERT_EQ_INT((int)player_local->attack_backswing_time, 0);
+    ASSERT_EQ_INT((int)player_local->ability_cooldown[WOW_ABILITY_STRIKE], 0);
+
+    player->s.origin.x = player->s.origin2.x = 100.0f;
+    creature->s.origin.x = creature->s.origin2.x = 120.0f;
+    player_local->enemy = creature;
+    player->client->ps.selected_entity = creature->s.number;
+    client->quest = (WOWQUESTPROGRESS){
+        .id = WOW_QUEST_FIRST_HUNT,
+        .state = WOW_QUEST_ACTIVE,
+    };
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_THROW));
+    ASSERT(player_local->ability_cooldown[WOW_ABILITY_THROW] > 0);
+    projectile = &wow_edicts[globals.num_edicts - 1];
+    ASSERT_EQ_INT((int)Wow_EntityLocal(projectile)->kind, WOW_ENTITY_PROJECTILE);
+    FOR_LOOP(i, 20)
+        if (projectile->inuse) Wow_RunProjectile(projectile);
+    ASSERT(!projectile->inuse);
+    ASSERT_EQ_INT((int)creature_local->health, 1);
+    ASSERT(!creature_local->dead);
+    ASSERT_EQ_INT((int)player_local->xp, 0);
+    ASSERT_EQ_INT((int)player_local->power, 0);
+    ASSERT_EQ_INT((int)client->quest.count, 0);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_NONE);
+    ASSERT_EQ_INT((int)creature_local->num_loot, 0);
+
+    player->client = NULL;
     if (game->Shutdown) game->Shutdown();
 }
 
@@ -1776,6 +1860,7 @@ static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
 int main(void) {
     RUN_TEST(test_wow_ground_query_reads_artificial_adt);
     RUN_TEST(test_wow_wmo_world_query_handles_floors_ramp_walls_and_door);
+    RUN_TEST(test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards);
     RUN_TEST(test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp);
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);

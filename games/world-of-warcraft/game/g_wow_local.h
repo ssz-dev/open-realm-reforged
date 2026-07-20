@@ -35,6 +35,13 @@
 #define BZ_WOW_CREATURE_REGEN_TIME 500
 #define BZ_WOW_CREATURE_RESPAWN_TIME 5000
 #define BZ_WOW_CREATURE_ATTACK_DAMAGE 1
+#define BZ_WOW_AI_STUCK_TIME 1000
+/* 700 ms returned to the direct vector before a creature could clear a normal WMO wall edge. */
+#define BZ_WOW_AI_STEER_TIME 2400
+#define BZ_WOW_AI_LAST_VALID_DISTANCE 1.5f
+#define BZ_WOW_AI_PROGRESS_EPSILON 0.025f
+#define BZ_WOW_AI_LOS_RADIUS 0.05f
+#define BZ_WOW_PROJECTILE_COLLISION_RADIUS 0.25f
 #define BZ_WOW_GRAVITY 19.6f
 #define BZ_WOW_TERMINAL_VELOCITY 60.0f
 #define BZ_WOW_STEP_HEIGHT 0.75f
@@ -86,6 +93,13 @@ typedef enum {
     WOW_AI_DEAD,
     WOW_AI_RESPAWN,
 } wowAiState_t;
+
+typedef enum {
+    WOW_AI_PATH_DIRECT,
+    WOW_AI_PATH_STEER,
+    WOW_AI_PATH_RECOVER,
+    WOW_AI_PATH_FAILED,
+} wowAiPathState_t;
 
 typedef enum {
     WOW_ABILITY_STRIKE,
@@ -240,6 +254,14 @@ typedef struct wowMove_s {
 } wowMove_t, *LPWOWMOVE;
 
 typedef struct {
+    LPCEDICT ent;
+    VECTOR3 start;
+    VECTOR2 displacement;
+} WOWENTITYSWEEP;
+typedef WOWENTITYSWEEP *LPWOWENTITYSWEEP;
+typedef WOWENTITYSWEEP const *LPCWOWENTITYSWEEP;
+
+typedef struct {
     wowEntityKind_t kind;
     wowAiState_t ai_state;
     DWORD display_id;
@@ -263,6 +285,15 @@ typedef struct {
     VECTOR3 ground_normal;
     wowSurfaceType_t ground_surface;
     BOOL grounded;
+    struct {
+        VECTOR2 last_valid;
+        VECTOR2 steer;
+        DWORD stuck_time;
+        DWORD steer_time;
+        wowAiPathState_t state;
+        SHORT steer_sign;
+        BYTE recoveries;
+    } obstacle;
     DWORD attack_damage;
     DWORD attack_damage_point;
     DWORD attack_backswing;
@@ -363,6 +394,9 @@ void Wow_AdvanceEntityFrame(LPEDICT ent);
 LPEDICT Wow_Spawn(void);
 BOOL Wow_PlaceEntityOnGround(LPEDICT ent, LPCVECTOR3 position);
 BOOL Wow_MoveEntity(LPEDICT ent, LPCVECTOR2 displacement, FLOAT seconds);
+BOOL Wow_TraceEntityMove(LPCWOWENTITYSWEEP sweep, LPWOWSWEEPRESULT result);
+BOOL Wow_HasLineOfSight(LPCEDICT source, LPCEDICT target);
+void Wow_AIResetNavigation(LPEDICT ent);
 void Wow_AIIdle(LPEDICT ent);
 void Wow_AIMove(LPEDICT ent);
 void Wow_AIAttack(LPEDICT ent);

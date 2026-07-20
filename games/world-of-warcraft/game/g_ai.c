@@ -14,6 +14,19 @@ static wowMove_t wow_move_death = { "Death", NULL, NULL };
 #define WOW_DEFAULT_PAIN_TIME 450
 #define WOW_DEFAULT_DEATH_TIME 1200
 
+typedef enum {
+    WOW_AI_MOVE_REACHED,
+    WOW_AI_MOVE_MOVING,
+    WOW_AI_MOVE_FAILED,
+} wowAiMoveResult_t;
+
+typedef struct {
+    VECTOR2 target;
+    FLOAT speed;
+    FLOAT stop_distance;
+} WOWAIMOVEINPUT;
+typedef WOWAIMOVEINPUT const *LPCWOWAIMOVEINPUT;
+
 /* Projectile damage belongs to its caster for retaliation, power gain, XP, and quest credit. */
 LPEDICT Wow_CombatOwner(LPEDICT attacker) {
     wowEntityLocal_t *local = Wow_EntityLocal(attacker);
@@ -103,6 +116,41 @@ static void Wow_GainCombatPower(LPEDICT ent, DWORD amount) {
 FLOAT Wow_Distance2(LPCVECTOR2 a, LPCVECTOR2 b) {
     VECTOR2 delta = Vector2_sub(a, b);
     return Vector2_len(&delta);
+}
+
+/* Combat visibility uses the same world sweep as movement and projectiles, never a parallel ray pipeline. */
+BOOL Wow_HasLineOfSight(LPCEDICT source, LPCEDICT target) {
+    wowEntityLocal_t *source_local = Wow_EntityLocal(source);
+    wowEntityLocal_t *target_local = Wow_EntityLocal(target);
+    FLOAT source_height, target_height;
+    WOWSWEEPQUERY query;
+    WOWSWEEPRESULT trace;
+
+    if (!source || !target || !source_local || !target_local || !source->inuse || !target->inuse) return false;
+    source_height = source_local->kind == WOW_ENTITY_PLAYER ? 1.4f : MAX(0.75f, source->s.radius * 1.25f);
+    target_height = target_local->kind == WOW_ENTITY_PLAYER ? 1.4f : MAX(0.75f, target->s.radius * 1.25f);
+    query = (WOWSWEEPQUERY){
+        .start = { source->s.origin.x, source->s.origin.y, source->s.origin.z + source_height },
+        .displacement = {
+            target->s.origin.x - source->s.origin.x,
+            target->s.origin.y - source->s.origin.y,
+            target->s.origin.z + target_height - source->s.origin.z - source_height,
+        },
+        .radius = BZ_WOW_AI_LOS_RADIUS,
+        .height = BZ_WOW_AI_LOS_RADIUS * 2.0f,
+    };
+    return !CM_WowSweepWorld(&query, &trace);
+}
+
+/* Spawn and successful return-to-idle are the only points that redefine the non-persistent safe checkpoint. */
+void Wow_AIResetNavigation(LPEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+    if (!ent || !local) return;
+    memset(&local->obstacle, 0, sizeof(local->obstacle));
+    local->obstacle.last_valid = ent->s.origin2;
+    local->obstacle.state = WOW_AI_PATH_DIRECT;
+    local->obstacle.steer_sign = ent->s.number & 1 ? 1 : -1;
 }
 
 static void Wow_ResetAttack(wowEntityLocal_t *local) {
@@ -390,7 +438,7 @@ void Wow_AIAttack(LPEDICT ent) {
      * chase logic in Wow_RunFrame will close the gap automatically. */
     {
         VECTOR2 delta = Vector2_sub(&target->s.origin2, &ent->s.origin2);
-        if (Vector2_len(&delta) > WOW_MELEE_RANGE) {
+        if (Vector2_len(&delta) > WOW_MELEE_RANGE || !Wow_HasLineOfSight(ent, target)) {
             if (local->kind == WOW_ENTITY_CREATURE) local->ai_state = WOW_AI_CHASE;
             return;
         }
@@ -442,6 +490,7 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker) {
     local->ai_state = WOW_AI_DEAD;
     local->health = 0;
     local->enemy = NULL;
+    Wow_AIResetNavigation(ent);
     Wow_ResetAttack(local);
     local->respawn_time = local->kind == WOW_ENTITY_CREATURE ? BZ_WOW_CREATURE_RESPAWN_TIME : 0;
     local->regen_time = 0;
@@ -504,7 +553,8 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
             local->attack_damage_done = true;
             /* Enhanced strikes replace exactly one shared damage point, then auto-attacks return to base damage. */
             local->attack_damage = BZ_WOW_STRIKE_DAMAGE;
-            if (target && Wow_Distance2(&target->s.origin2, &ent->s.origin2) <= WOW_MELEE_RANGE)
+            if (target && Wow_Distance2(&target->s.origin2, &ent->s.origin2) <= WOW_MELEE_RANGE &&
+                Wow_HasLineOfSight(ent, target))
                 Wow_DealDamage(target, ent, damage);
         }
         return true;
@@ -553,25 +603,113 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
     return false;
 }
 
-/* Chase and evade share movement but use different destinations, speeds, and stopping distances. */
-static BOOL Wow_AIMoveToward(LPEDICT ent, LPCVECTOR2 target, FLOAT speed, FLOAT stop_distance) {
+/* A small deterministic fan chooses a locally clear direction and retains it long enough to avoid jitter. */
+static BOOL Wow_AIChooseSteer(LPEDICT ent, LPCVECTOR2 desired, FLOAT probe_distance) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
-    VECTOR2 delta;
-    FLOAT distance;
-    FLOAT step;
-    VECTOR2 displacement;
+    WOWSWEEPRESULT direct_trace;
+    VECTOR2 tangent, candidate[4], best = { 0.0f, 0.0f };
+    FLOAT normal_length, best_score = 0.0f;
 
-    if (!ent || !local || !target) return false;
-    delta = Vector2_sub(target, &ent->s.origin2);
-    distance = Vector2_len(&delta);
-    if (distance <= stop_distance || distance <= 0.001f) return false;
-    step = MIN(speed * ((FLOAT)FRAMETIME / 1000.0f), distance - stop_distance);
-    displacement = (VECTOR2){ delta.x * step / distance, delta.y * step / distance };
-    if (!Wow_MoveEntity(ent, &displacement, (FLOAT)FRAMETIME / 1000.0f)) return true;
-    local->yaw = (FLOAT)RAD2DEG(atan2f(delta.y, delta.x));
-    ent->s.angle = (FLOAT)DEG2RAD(local->yaw);
-    Wow_SetRunMove(ent);
+    if (!ent || !local || !desired || probe_distance <= 0.0f) return false;
+    (void)Wow_TraceEntityMove(&(WOWENTITYSWEEP){
+        ent, ent->s.origin, Vector2_scale(desired, probe_distance)
+    }, &direct_trace);
+    tangent = (VECTOR2){ -direct_trace.normal.y, direct_trace.normal.x };
+    normal_length = Vector2_len(&tangent);
+    if (normal_length <= 0.001f) tangent = (VECTOR2){ -desired->y, desired->x };
+    else tangent = Vector2_scale(&tangent, 1.0f / normal_length);
+    candidate[0] = Vector2_add(desired, &tangent);
+    candidate[1] = Vector2_sub(desired, &tangent);
+    candidate[2] = tangent;
+    candidate[3] = Vector2_unm(&tangent);
+
+    FOR_LOOP(i, 4) {
+        WOWSWEEPRESULT trace;
+        VECTOR2 displacement;
+        FLOAT length = Vector2_len(&candidate[i]);
+        FLOAT clearance, forward, cross, score;
+
+        if (length <= 0.001f) continue;
+        candidate[i] = Vector2_scale(&candidate[i], 1.0f / length);
+        displacement = Vector2_scale(&candidate[i], probe_distance);
+        clearance = Wow_TraceEntityMove(&(WOWENTITYSWEEP){ ent, ent->s.origin, displacement }, &trace)
+            ? trace.fraction : 1.0f;
+        if (clearance <= 0.05f) continue;
+        forward = MAX(0.0f, Vector2_dot(&candidate[i], desired));
+        cross = desired->x * candidate[i].y - desired->y * candidate[i].x;
+        score = clearance * (0.25f + 0.75f * forward) +
+            ((cross >= 0.0f ? 1 : -1) == local->obstacle.steer_sign ? 0.01f : 0.0f);
+        if (score <= best_score) continue;
+        best = candidate[i]; best_score = score;
+    }
+    if (best_score <= 0.0f) return false;
+    local->obstacle.steer = best;
+    local->obstacle.steer_sign = desired->x * best.y - desired->y * best.x >= 0.0f ? 1 : -1;
     return true;
+}
+
+/* Chase and evade retain local steering, then recover to a distinct last-valid checkpoint before failing. */
+static wowAiMoveResult_t Wow_AIMoveToward(LPEDICT ent, LPCWOWAIMOVEINPUT input) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    VECTOR2 target, delta, direction, displacement, before, actual;
+    FLOAT distance, step, progress;
+    BOOL recovering;
+
+    if (!ent || !local || !input) return WOW_AI_MOVE_FAILED;
+    if (local->obstacle.state == WOW_AI_PATH_FAILED) return WOW_AI_MOVE_FAILED;
+    recovering = local->obstacle.state == WOW_AI_PATH_RECOVER;
+    target = recovering ? local->obstacle.last_valid : input->target;
+    delta = Vector2_sub(&target, &ent->s.origin2);
+    distance = Vector2_len(&delta);
+    if (distance <= (recovering ? 0.1f : input->stop_distance) || distance <= 0.001f) {
+        if (!recovering) return WOW_AI_MOVE_REACHED;
+        local->obstacle.state = WOW_AI_PATH_DIRECT;
+        local->obstacle.stuck_time = local->obstacle.steer_time = 0;
+        local->obstacle.steer_sign = -local->obstacle.steer_sign;
+        return WOW_AI_MOVE_MOVING;
+    }
+    direction = Vector2_scale(&delta, 1.0f / distance);
+    if (local->obstacle.state == WOW_AI_PATH_STEER && local->obstacle.steer_time)
+        direction = local->obstacle.steer;
+    step = MIN(input->speed * ((FLOAT)FRAMETIME / 1000.0f),
+               MAX(0.0f, distance - (recovering ? 0.1f : input->stop_distance)));
+    displacement = Vector2_scale(&direction, step);
+    before = ent->s.origin2;
+    (void)Wow_MoveEntity(ent, &displacement, (FLOAT)FRAMETIME / 1000.0f);
+    actual = Vector2_sub(&ent->s.origin2, &before);
+    progress = Vector2_len(&actual);
+    if (local->obstacle.state == WOW_AI_PATH_STEER) {
+        local->obstacle.steer_time = local->obstacle.steer_time > FRAMETIME
+            ? local->obstacle.steer_time - FRAMETIME : 0;
+        if (!local->obstacle.steer_time) local->obstacle.state = WOW_AI_PATH_DIRECT;
+    }
+    if (progress >= BZ_WOW_AI_PROGRESS_EPSILON) {
+        local->obstacle.stuck_time = 0;
+        if (!recovering &&
+            Wow_Distance2(&local->obstacle.last_valid, &ent->s.origin2) >= BZ_WOW_AI_LAST_VALID_DISTANCE)
+            local->obstacle.last_valid = ent->s.origin2;
+        local->yaw = (FLOAT)RAD2DEG(atan2f(actual.y, actual.x));
+        ent->s.angle = (FLOAT)DEG2RAD(local->yaw);
+        Wow_SetRunMove(ent);
+        return WOW_AI_MOVE_MOVING;
+    }
+
+    local->obstacle.stuck_time += FRAMETIME;
+    if (!recovering && local->obstacle.state != WOW_AI_PATH_STEER &&
+        Wow_AIChooseSteer(ent, &direction, MAX(0.5f, step * 2.0f))) {
+        local->obstacle.state = WOW_AI_PATH_STEER;
+        local->obstacle.steer_time = BZ_WOW_AI_STEER_TIME;
+    }
+    if (local->obstacle.stuck_time < BZ_WOW_AI_STUCK_TIME) return WOW_AI_MOVE_MOVING;
+    if (!recovering && !local->obstacle.recoveries &&
+        Wow_Distance2(&local->obstacle.last_valid, &ent->s.origin2) > 0.2f) {
+        local->obstacle.state = WOW_AI_PATH_RECOVER;
+        local->obstacle.recoveries = 1;
+        local->obstacle.stuck_time = local->obstacle.steer_time = 0;
+        return WOW_AI_MOVE_MOVING;
+    }
+    local->obstacle.state = WOW_AI_PATH_FAILED;
+    return WOW_AI_MOVE_FAILED;
 }
 
 /* Idle creatures only acquire the single server player inside their configured aggro radius. */
@@ -580,9 +718,11 @@ static BOOL Wow_AIAcquirePlayer(LPEDICT ent) {
     LPEDICT player = &wow_edicts[0];
 
     if (!ent || !local || !local->hostile || !Wow_EntityCanBeTargeted(player) ||
-        Wow_Distance2(&player->s.origin2, &ent->s.origin2) > BZ_WOW_CREATURE_AGGRO_RANGE) return false;
+        Wow_Distance2(&player->s.origin2, &ent->s.origin2) > BZ_WOW_CREATURE_AGGRO_RANGE ||
+        !Wow_HasLineOfSight(ent, player)) return false;
     local->enemy = player;
     local->ai_state = WOW_AI_AGGRO;
+    Wow_AIResetNavigation(ent);
     Wow_SetCombatReadyAnimation(ent);
     return true;
 }
@@ -596,11 +736,19 @@ static BOOL Wow_AIShouldEvade(LPEDICT ent, wowEntityLocal_t *local) {
 /* Evade clears combat ownership immediately and restores health on a fixed server-time cadence. */
 static void Wow_AIEnterEvade(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    VECTOR2 last_valid;
+    SHORT steer_sign;
 
     if (!ent || !local) return;
+    last_valid = local->obstacle.last_valid;
+    steer_sign = local->obstacle.steer_sign;
     local->enemy = NULL;
     local->ai_state = WOW_AI_EVADE;
     local->regen_time = BZ_WOW_CREATURE_REGEN_TIME;
+    memset(&local->obstacle, 0, sizeof(local->obstacle));
+    local->obstacle.last_valid = last_valid;
+    local->obstacle.state = WOW_AI_PATH_DIRECT;
+    local->obstacle.steer_sign = steer_sign;
     Wow_ResetAttack(local);
     Wow_SetRunMove(ent);
 }
@@ -634,6 +782,7 @@ static void Wow_AIRespawn(LPEDICT ent) {
     local->health = local->max_health;
     local->enemy = NULL;
     local->death_time = local->respawn_time = local->regen_time = 0;
+    Wow_AIResetNavigation(ent);
     Wow_ResetAttack(local);
     Wow_ClearLoot(ent);
     ent->svflags = (ent->svflags | SVF_MONSTER) & ~SVF_DEADMONSTER;
@@ -644,7 +793,9 @@ static void Wow_AIRespawn(LPEDICT ent) {
 
 void Wow_AIRunFrame(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    wowAiMoveResult_t move_result;
     FLOAT target_distance;
+    BOOL can_attack;
 
     if (!ent || !local) {
         return;
@@ -663,9 +814,13 @@ void Wow_AIRunFrame(LPEDICT ent) {
 
     if (local->ai_state == WOW_AI_EVADE) {
         Wow_AIRegenerate(ent, local);
-        if (!Wow_AIMoveToward(ent, &local->home, BZ_WOW_CREATURE_EVADE_SPEED, 0.0f) &&
+        move_result = Wow_AIMoveToward(ent, &(WOWAIMOVEINPUT){
+            local->home, BZ_WOW_CREATURE_EVADE_SPEED, 0.0f
+        });
+        if ((move_result == WOW_AI_MOVE_REACHED || move_result == WOW_AI_MOVE_FAILED) &&
             local->health == local->max_health) {
             local->ai_state = WOW_AI_IDLE;
+            Wow_AIResetNavigation(ent);
             Wow_SetStandMove(ent);
         }
         Wow_AdvanceEntityFrame(ent);
@@ -698,11 +853,20 @@ void Wow_AIRunFrame(LPEDICT ent) {
         return;
     }
     target_distance = Wow_Distance2(&local->enemy->s.origin2, &ent->s.origin2);
-    if (target_distance > WOW_MELEE_RANGE) {
+    can_attack = target_distance <= WOW_MELEE_RANGE && Wow_HasLineOfSight(ent, local->enemy);
+    if (!can_attack) {
         local->ai_state = WOW_AI_CHASE;
-        Wow_AIMoveToward(ent, &local->enemy->s.origin2, BZ_WOW_CREATURE_CHASE_SPEED, WOW_MELEE_RANGE);
+        move_result = Wow_AIMoveToward(ent, &(WOWAIMOVEINPUT){
+            local->enemy->s.origin2, BZ_WOW_CREATURE_CHASE_SPEED,
+            target_distance <= WOW_MELEE_RANGE ? 0.0f : WOW_MELEE_RANGE
+        });
+        if (move_result == WOW_AI_MOVE_FAILED) {
+            Wow_AIEnterEvade(ent);
+            return;
+        }
     } else {
         local->ai_state = WOW_AI_ATTACK;
+        Wow_AIResetNavigation(ent);
         (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
         if (ent->attack) ent->attack(ent);
     }

@@ -32,6 +32,11 @@ static DWORD g_pain_calls = 0;
 static wowClient_t g_player_client;
 static BOOL g_ground_enabled = true;
 static FLOAT g_ground_slope_x;
+static enum {
+    TEST_WORLD_CLEAR,
+    TEST_WORLD_BLOCKED,
+    TEST_WORLD_WALL_X,
+} g_world_mode;
 
 void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD value) {
     (void)player;
@@ -56,12 +61,24 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
 }
 
 BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
+    FLOAT length;
+
     if (!query || !result) return false;
     *result = (WOWSWEEPRESULT){
         .end = Vector3_add(&query->start, &query->displacement),
         .fraction = 1.0f,
     };
-    return false;
+    if (g_world_mode == TEST_WORLD_CLEAR ||
+        (g_world_mode == TEST_WORLD_WALL_X && query->displacement.x <= 0.0001f)) return false;
+    length = sqrtf(query->displacement.x * query->displacement.x +
+                   query->displacement.y * query->displacement.y);
+    result->end = query->start;
+    result->normal = length > 0.0001f
+        ? (VECTOR3){ -query->displacement.x / length, -query->displacement.y / length, 0.0f }
+        : (VECTOR3){ -1.0f, 0.0f, 0.0f };
+    result->fraction = 0.0f;
+    result->surface = WOW_SURFACE_WMO;
+    return true;
 }
 
 DWORD Wow_EntityIndex(LPCEDICT ent) {
@@ -162,6 +179,7 @@ static void test_reset_world(void) {
     g_pain_calls = 0;
     g_ground_enabled = true;
     g_ground_slope_x = 0.0f;
+    g_world_mode = TEST_WORLD_CLEAR;
 }
 
 static void test_prepare_pair(LPEDICT *attacker_out, LPEDICT *target_out) {
@@ -244,6 +262,7 @@ static void test_prepare_player_creature(LPEDICT *player_out, LPEDICT *creature_
     creature_local->ground_height = 7.0f;
     creature_local->ground_normal = (VECTOR3){ 0.0f, 0.0f, 1.0f };
     creature_local->ground_surface = WOW_SURFACE_TERRAIN;
+    Wow_AIResetNavigation(creature);
     *player_out = player;
     *creature_out = creature;
 }
@@ -308,6 +327,47 @@ static void test_wow_swing_requires_target_in_range_at_damage_point(void) {
     target->s.origin2.x = WOW_MELEE_RANGE + 1.0f;
     FOR_LOOP(i, 4) Wow_AIAdvanceLockedFrame(attacker);
     ASSERT_EQ_INT((int)target_local->health, 3);
+}
+
+static void test_wow_walls_block_proximity_aggro_and_melee_start(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+
+    test_prepare_player_creature(&player, &creature);
+    local = Wow_EntityLocal(creature);
+    creature->s.origin2.x = creature->s.origin.x = 2.0f;
+    local->home = creature->s.origin2;
+    g_world_mode = TEST_WORLD_BLOCKED;
+    ASSERT(!Wow_HasLineOfSight(creature, player));
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_IDLE);
+    ASSERT_NULL(local->enemy);
+
+    local->enemy = player;
+    local->ai_state = WOW_AI_CHASE;
+    Wow_AIAttack(creature);
+    ASSERT_EQ_INT((int)local->attack_damage_time, 0);
+    ASSERT_EQ_INT((int)local->attack_backswing_time, 0);
+    g_world_mode = TEST_WORLD_CLEAR;
+    ASSERT(Wow_HasLineOfSight(creature, player));
+    Wow_AIAttack(creature);
+    ASSERT_EQ_INT((int)local->attack_damage_time, 200);
+    ASSERT_EQ_INT((int)local->attack_backswing_time, 300);
+}
+
+static void test_wow_wall_at_damage_point_cancels_melee_hit(void) {
+    LPEDICT attacker;
+    LPEDICT target;
+    wowEntityLocal_t *target_local;
+
+    test_prepare_pair(&attacker, &target);
+    target_local = Wow_EntityLocal(target);
+    Wow_AIAttack(attacker);
+    g_world_mode = TEST_WORLD_BLOCKED;
+    FOR_LOOP(i, 4) Wow_AIAdvanceLockedFrame(attacker);
+    ASSERT_EQ_INT((int)target_local->health, 3);
+    ASSERT_EQ_INT((int)g_pain_calls, 0);
 }
 
 static void test_wow_attack_lethal_triggers_death_state(void) {
@@ -585,6 +645,77 @@ static void test_wow_creature_chase_and_evade_follow_uneven_ground(void) {
     ASSERT(local->grounded);
 }
 
+static void test_wow_creature_retains_clear_local_steering(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+    FLOAT first_y;
+    SHORT steer_sign;
+
+    test_prepare_player_creature(&player, &creature);
+    local = Wow_EntityLocal(creature);
+    player->s.origin2 = (VECTOR2){ 10.0f, 0.0f };
+    player->s.origin.x = 10.0f;
+    creature->s.origin2 = (VECTOR2){ 0.0f, 0.0f };
+    creature->s.origin.x = 0.0f;
+    local->home = creature->s.origin2;
+    local->enemy = player;
+    local->ai_state = WOW_AI_CHASE;
+    Wow_AIResetNavigation(creature);
+    g_world_mode = TEST_WORLD_WALL_X;
+
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->obstacle.state, WOW_AI_PATH_STEER);
+    ASSERT_EQ_FLOAT(creature->s.origin.x, 0.0f, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.y, 0.0f, 0.001f);
+    steer_sign = local->obstacle.steer_sign;
+    Wow_AIRunFrame(creature);
+    first_y = creature->s.origin.y;
+    ASSERT(fabsf(first_y) >= BZ_WOW_AI_PROGRESS_EPSILON);
+    FOR_LOOP(i, 4) {
+        Wow_AIRunFrame(creature);
+        ASSERT_EQ_INT((int)local->obstacle.steer_sign, (int)steer_sign);
+        ASSERT(first_y * creature->s.origin.y > 0.0f);
+    }
+    ASSERT(fabsf(creature->s.origin.y) > fabsf(first_y));
+    ASSERT(local->obstacle.steer_time > 0);
+}
+
+static void test_wow_blocked_creature_recovers_then_evades_without_teleport(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+    VECTOR2 blocked_at, last_valid;
+
+    test_prepare_player_creature(&player, &creature);
+    local = Wow_EntityLocal(creature);
+    player->s.origin2 = (VECTOR2){ 20.0f, 0.0f };
+    player->s.origin.x = 20.0f;
+    creature->s.origin2 = (VECTOR2){ 0.0f, 0.0f };
+    creature->s.origin.x = 0.0f;
+    local->home = creature->s.origin2;
+    local->enemy = player;
+    local->ai_state = WOW_AI_CHASE;
+    Wow_AIResetNavigation(creature);
+    FOR_LOOP(i, 5) Wow_AIRunFrame(creature);
+    blocked_at = creature->s.origin2;
+    last_valid = local->obstacle.last_valid;
+    ASSERT(Wow_Distance2(&last_valid, &blocked_at) > 0.2f);
+
+    g_world_mode = TEST_WORLD_BLOCKED;
+    FOR_LOOP(i, BZ_WOW_AI_STUCK_TIME / FRAMETIME) Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->obstacle.state, WOW_AI_PATH_RECOVER);
+    ASSERT_EQ_FLOAT(creature->s.origin.x, blocked_at.x, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.y, blocked_at.y, 0.001f);
+    ASSERT(Wow_Distance2(&local->obstacle.last_valid, &creature->s.origin2) > 0.2f);
+
+    FOR_LOOP(i, BZ_WOW_AI_STUCK_TIME * 3 / FRAMETIME + 2) Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_IDLE);
+    ASSERT_NULL(local->enemy);
+    ASSERT_EQ_FLOAT(creature->s.origin.x, blocked_at.x, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.y, blocked_at.y, 0.001f);
+}
+
 static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
     LPEDICT player;
     LPEDICT creature;
@@ -624,6 +755,10 @@ static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
     ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
     ASSERT_EQ_INT((int)creature_local->num_loot, BZ_WOW_MAX_LOOT_ITEMS);
     player->s.origin2.x = player->s.origin.x = 100.0f;
+    creature_local->obstacle.state = WOW_AI_PATH_FAILED;
+    creature_local->obstacle.stuck_time = 999;
+    creature_local->obstacle.steer_time = 777;
+    creature_local->obstacle.recoveries = 1;
     FOR_LOOP(i, 70) Wow_AIRunFrame(creature);
     ASSERT(!creature_local->dead);
     ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_IDLE);
@@ -639,6 +774,12 @@ static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
     ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 255);
     ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_NONE);
     ASSERT_EQ_INT((int)creature_local->num_loot, 0);
+    ASSERT_EQ_INT((int)creature_local->obstacle.state, WOW_AI_PATH_DIRECT);
+    ASSERT_EQ_INT((int)creature_local->obstacle.stuck_time, 0);
+    ASSERT_EQ_INT((int)creature_local->obstacle.steer_time, 0);
+    ASSERT_EQ_INT((int)creature_local->obstacle.recoveries, 0);
+    ASSERT_EQ_FLOAT(creature_local->obstacle.last_valid.x, creature_local->home.x, 0.001f);
+    ASSERT_EQ_FLOAT(creature_local->obstacle.last_valid.y, creature_local->home.y, 0.001f);
 }
 
 static void test_wow_creature_respawn_defers_without_ground(void) {
@@ -669,6 +810,8 @@ int main(void) {
     RUN_TEST(test_wow_attack_applies_damage_after_damage_point);
     RUN_TEST(test_wow_attack_uses_explicit_timing_over_animation_split);
     RUN_TEST(test_wow_swing_requires_target_in_range_at_damage_point);
+    RUN_TEST(test_wow_walls_block_proximity_aggro_and_melee_start);
+    RUN_TEST(test_wow_wall_at_damage_point_cancels_melee_hit);
     RUN_TEST(test_wow_attack_lethal_triggers_death_state);
     RUN_TEST(test_wow_dead_entity_ignores_pain_and_attack);
     RUN_TEST(test_wow_death_holds_terminal_frame);
@@ -682,6 +825,8 @@ int main(void) {
     RUN_TEST(test_wow_creature_attack_uses_cooldown_and_real_player_vitals);
     RUN_TEST(test_wow_creature_leashes_and_regenerates_without_xp);
     RUN_TEST(test_wow_creature_chase_and_evade_follow_uneven_ground);
+    RUN_TEST(test_wow_creature_retains_clear_local_steering);
+    RUN_TEST(test_wow_blocked_creature_recovers_then_evades_without_teleport);
     RUN_TEST(test_wow_creature_death_awards_once_and_respawns_clean);
     RUN_TEST(test_wow_creature_respawn_defers_without_ground);
     TEST_RESULTS();

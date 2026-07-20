@@ -60,6 +60,38 @@ M2 doodads are not made solid by their render bounds. A future doodad slice
 must require verified collision geometry or a documented collidable flag; a
 blanket AABB over all ADT doodads would close doors and block grass.
 
+## Combat sight and local creature steering
+
+`Wow_HasLineOfSight`, entity movement probes, and projectile travel all call
+`CM_WowSweepWorld`. There is no separate AI raycaster. Proximity aggro requires
+clear sight, melee checks sight before starting a swing and again at the
+animation damage point, and a projectile WMO hit removes the projectile before
+damage, XP, quest, or loot code can run.
+
+Creature chase and evade remain local behaviors rather than a navmesh:
+
+```text
+direct movement
+  -> contact normal
+  -> four deterministic short candidate sweeps
+  -> retained local steering
+  -> last-valid checkpoint recovery
+  -> evade on repeated failure
+```
+
+`wowAiPathState_t` represents the mutually exclusive direct, steering,
+recovery, and failed states. A creature is stuck only while it requests
+movement but makes less than `BZ_WOW_AI_PROGRESS_EPSILON` for
+`BZ_WOW_AI_STUCK_TIME`. Attack, death, and respawn frames do not accumulate
+stuck time. Steering is retained long enough to clear a normal WMO edge, so
+the direct target vector cannot pull the creature into a wall oscillation on
+the next frame.
+
+`obstacle.last_valid` is a distinct, periodically updated checkpoint. Recovery
+moves through the normal collision pipeline; it never assigns the saved
+position directly. The whole obstacle block is transient entity-local state,
+is absent from player persistence, and resets on spawn and respawn.
+
 ## Tests
 
 Run the artificial physics fixtures without WoW assets:
@@ -73,7 +105,10 @@ make test-wow-game
 
 `test_wow_physics.c` supplies analytic ground and obstacle surfaces for wall,
 corner, door, slide, thin-wall sweep, depenetration, dead-entity, and respawn
-paths. `test_wow_wmo.c` verifies the shared root/group parser and MODF
-transform. `test_wow_game.c` builds an artificial ADT and WMO with stacked
-floors, roof, ramp, split wall, and open doorway, then runs player movement and
-creature chase through the real world query. No fixture reads `data/`.
+paths. `test_wow_combat.c` covers clear and blocked sight, melee damage-point
+rechecks, retained steering, stuck recovery, evade, and navigation reset.
+`test_wow_wmo.c` verifies the shared root/group parser and MODF transform.
+`test_wow_game.c` builds an artificial ADT and WMO with stacked floors, roof,
+ramp, split wall, and open doorway, then runs player movement, creature
+detouring, aggro, melee, projectile collision, and reward suppression through
+the real world query. No fixture reads `data/`.

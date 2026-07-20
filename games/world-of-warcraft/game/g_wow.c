@@ -521,24 +521,47 @@ void Wow_RunProjectile(LPEDICT ent) {
         VECTOR2 delta = Vector2_sub(&t2, &p2);
         FLOAT dist = sqrtf(delta.x * delta.x + delta.y * delta.y);
         FLOAT step = local->projectile_speed * ((FLOAT)FRAMETIME / 1000.0f);
+        FLOAT travel = MIN(step, dist);
+        VECTOR2 displacement;
+        WOWSWEEPQUERY query;
+        WOWSWEEPRESULT trace;
 
+        if (dist <= 0.001f) {
+            Wow_DealDamage(target, ent, local->projectile_damage);
+            ent->inuse = false;
+            return;
+        }
+        displacement = (VECTOR2){ delta.x * travel / dist, delta.y * travel / dist };
+        query = (WOWSWEEPQUERY){
+            .start = {
+                ent->s.origin.x, ent->s.origin.y,
+                ent->s.origin.z - BZ_WOW_PROJECTILE_COLLISION_RADIUS,
+            },
+            .displacement = { displacement.x, displacement.y, 0.0f },
+            .radius = BZ_WOW_PROJECTILE_COLLISION_RADIUS,
+            .height = BZ_WOW_PROJECTILE_COLLISION_RADIUS * 2.0f,
+        };
+        /* The final homing segment must hit WMO geometry before damage can award any combat progression. */
+        if (CM_WowSweepWorld(&query, &trace)) {
+            ent->inuse = false;
+            return;
+        }
         if (dist <= step) {
             Wow_DealDamage(target, ent, local->projectile_damage);
             ent->inuse = false;
             return;
         }
-        /* Move toward target (homing). */
-        ent->s.origin.x += delta.x * step / dist;
-        ent->s.origin.y += delta.y * step / dist;
+        ent->s.origin.x += displacement.x;
+        ent->s.origin.y += displacement.y;
         {
-            WOWGROUNDQUERY query = {
+            WOWGROUNDQUERY ground_query = {
                 .origin = ent->s.origin,
                 .max_down = BZ_WOW_GROUND_QUERY_DOWN,
                 .max_up = BZ_WOW_GROUND_PLACE_UP,
             };
             WOWGROUNDRESULT ground;
 
-            if (CM_WowQueryGround(&query, &ground)) ent->s.origin.z = ground.height + 3.0f;
+            if (CM_WowQueryGround(&ground_query, &ground)) ent->s.origin.z = ground.height + 3.0f;
         }
         ent->s.angle = (FLOAT)DEG2RAD(local->projectile_yaw);
     }

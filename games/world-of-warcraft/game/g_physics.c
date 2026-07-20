@@ -17,18 +17,25 @@ static void Wow_PhysicsSetAirborne(wowEntityLocal_t *local) {
 }
 
 /* Player and creature dimensions differ, but both enter the same vertical-capsule sweep contract. */
-static WOWSWEEPQUERY Wow_PhysicsSweepQuery(LPEDICT ent, LPCVECTOR3 start, LPCVECTOR2 displacement) {
-    wowEntityLocal_t *local = Wow_EntityLocal(ent);
-    FLOAT radius = local->kind == WOW_ENTITY_PLAYER ? BZ_WOW_PLAYER_COLLISION_RADIUS : MAX(0.5f, ent->s.radius);
+static WOWSWEEPQUERY Wow_PhysicsSweepQuery(LPCWOWENTITYSWEEP sweep) {
+    wowEntityLocal_t *local = Wow_EntityLocal(sweep->ent);
+    FLOAT radius = local->kind == WOW_ENTITY_PLAYER
+        ? BZ_WOW_PLAYER_COLLISION_RADIUS : MAX(0.5f, sweep->ent->s.radius);
     FLOAT height = local->kind == WOW_ENTITY_PLAYER ? BZ_WOW_PLAYER_COLLISION_HEIGHT :
         MAX(radius * 2.0f, radius * BZ_WOW_CREATURE_COLLISION_HEIGHT_SCALE);
 
     return (WOWSWEEPQUERY){
-        .start = *start,
-        .displacement = { displacement->x, displacement->y, 0.0f },
+        .start = sweep->start,
+        .displacement = { sweep->displacement.x, sweep->displacement.y, 0.0f },
         .radius = radius,
         .height = height,
     };
+}
+
+/* AI probes and actual movement share the exact entity-shape query builder and central world sweep. */
+BOOL Wow_TraceEntityMove(LPCWOWENTITYSWEEP sweep, LPWOWSWEEPRESULT result) {
+    WOWSWEEPQUERY query = Wow_PhysicsSweepQuery(sweep);
+    return CM_WowSweepWorld(&query, result);
 }
 
 /* Q2-style bounded bumps depenetrate first, then consume remaining motion along contact planes. */
@@ -39,7 +46,8 @@ static BOOL Wow_PhysicsSweepMove(LPEDICT ent, LPCVECTOR2 displacement, LPVECTOR2
 
     *resolved = (VECTOR2){ 0.0f, 0.0f };
     FOR_LOOP(bump, BZ_WOW_COLLISION_BUMPS) {
-        WOWSWEEPQUERY query = Wow_PhysicsSweepQuery(ent, &position, &remaining);
+        WOWENTITYSWEEP sweep = { ent, position, remaining };
+        WOWSWEEPQUERY query = Wow_PhysicsSweepQuery(&sweep);
         WOWSWEEPRESULT trace;
         VECTOR2 normal;
         FLOAT normal_length, into;
@@ -146,7 +154,7 @@ BOOL Wow_PlaceEntityOnGround(LPEDICT ent, LPCVECTOR3 position) {
     if (!CM_WowQueryGround(&query, &ground)) return false;
     grounded = *position;
     grounded.z = ground.height;
-    overlap = Wow_PhysicsSweepQuery(ent, &grounded, &(VECTOR2){ 0.0f, 0.0f });
+    overlap = Wow_PhysicsSweepQuery(&(WOWENTITYSWEEP){ ent, grounded, { 0.0f, 0.0f } });
     /* A floor alone is insufficient: respawns inside a MOBR wall must remain deferred. */
     if (CM_WowSweepWorld(&overlap, &trace) && trace.start_solid) return false;
     ent->s.origin = *position;
