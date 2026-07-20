@@ -54,13 +54,14 @@ DWORD Wow_XpForNextLevel(DWORD level) {
 void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim) {
     wowEntityLocal_t *source_local, *victim_local;
     LPEDICT source = Wow_CombatOwner(attacker);
-    DWORD needed;
+    DWORD needed, old_level;
 
     if (!source || !victim || source == victim) return;
     source_local = Wow_EntityLocal(source);
     victim_local = Wow_EntityLocal(victim);
     if (!source_local || !victim_local || source_local->kind != WOW_ENTITY_PLAYER ||
         victim_local->kind != WOW_ENTITY_CREATURE || !victim_local->xp_reward) return;
+    old_level = source_local->level;
     source_local->xp += victim_local->xp_reward;
     while ((needed = Wow_XpForNextLevel(source_local->level)) && source_local->xp >= needed) {
         source_local->xp -= needed;
@@ -73,6 +74,9 @@ void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim) {
     }
     if (source_local->level >= BZ_WOW_MAX_LEVEL) source_local->xp = 0;
     Wow_SyncEntityVitals(source);
+    Wow_SetCombatMessage(source,
+        source_local->level != old_level ? WOW_COMBAT_MESSAGE_LEVEL : WOW_COMBAT_MESSAGE_XP,
+        source_local->level != old_level ? source_local->level : victim_local->xp_reward);
 }
 
 static void Wow_GainCombatPower(LPEDICT ent, DWORD amount) {
@@ -83,13 +87,15 @@ static void Wow_GainCombatPower(LPEDICT ent, DWORD amount) {
     Wow_SyncEntityVitals(ent);
 }
 
-static FLOAT Wow_Distance2(LPCVECTOR2 a, LPCVECTOR2 b) {
+FLOAT Wow_Distance2(LPCVECTOR2 a, LPCVECTOR2 b) {
     VECTOR2 delta = Vector2_sub(a, b);
     return Vector2_len(&delta);
 }
 
 static void Wow_ResetAttack(wowEntityLocal_t *local) {
     if (!local) return;
+    local->attack_damage = local->kind == WOW_ENTITY_CREATURE
+        ? BZ_WOW_CREATURE_ATTACK_DAMAGE : BZ_WOW_STRIKE_DAMAGE;
     local->attack_time = 0;
     local->attack_damage_time = 0;
     local->attack_backswing_time = 0;
@@ -207,6 +213,8 @@ void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage) {
 
     Wow_GainCombatPower(source, damage * 5);
     Wow_GainCombatPower(target, damage * 3);
+    Wow_SetCombatMessage(source, WOW_COMBAT_MESSAGE_DAMAGE_DEALT, MIN(damage, target_local->health));
+    Wow_SetCombatMessage(target, WOW_COMBAT_MESSAGE_DAMAGE_TAKEN, MIN(damage, target_local->health));
     if (target_local->health <= damage) {
         Wow_AIDie(target, attacker);
         return;
@@ -470,10 +478,14 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
         Wow_AdvanceEntityFrame(ent);
         if (finished && !local->attack_damage_done) {
             LPEDICT target = Wow_EntityAffectingCombat(ent) ? local->enemy : NULL;
+            DWORD damage = local->attack_damage ? local->attack_damage :
+                (local->kind == WOW_ENTITY_CREATURE ? BZ_WOW_CREATURE_ATTACK_DAMAGE : BZ_WOW_STRIKE_DAMAGE);
 
             local->attack_damage_done = true;
+            /* Enhanced strikes replace exactly one shared damage point, then auto-attacks return to base damage. */
+            local->attack_damage = BZ_WOW_STRIKE_DAMAGE;
             if (target && Wow_Distance2(&target->s.origin2, &ent->s.origin2) <= WOW_MELEE_RANGE)
-                Wow_DealDamage(target, ent, BZ_WOW_CREATURE_ATTACK_DAMAGE);
+                Wow_DealDamage(target, ent, damage);
         }
         return true;
     }

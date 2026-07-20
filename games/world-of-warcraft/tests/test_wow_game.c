@@ -65,6 +65,7 @@ static animation_t test_animations[] = {
     { .name = "Ready1H",      .interval = { 0, 1000 } },
     { .name = "ReadyUnarmed", .interval = { 0, 1000 } },
     { .name = "Attack1H",     .interval = { 0, 1000 } },
+    { .name = "SpellCastOmni", .interval = { 0, 1000 } },
     { .name = "Pain",         .interval = { 0,  450 } },
     { .name = "Death",        .interval = { 0, 1200 } },
 };
@@ -259,6 +260,8 @@ static BOOL path_eq(LPCSTR a, LPCSTR b) {
 }
 
 static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
+    static BYTE artificial_firebolt;
+
     if (path_eq(filename, "DBFilesClient\\Map.dbc")) {
         return make_map_dbc(size);
     }
@@ -279,6 +282,10 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
     }
     if (path_eq(filename, "World\\Maps\\Azeroth\\Azeroth_31_31.adt")) {
         return make_area_adt(size);
+    }
+    if (path_eq(filename, "Spells\\Fireball_Missile_High.m2")) {
+        if (size) *size = 1;
+        return &artificial_firebolt;
     }
     if (size) {
         *size = 0;
@@ -476,7 +483,7 @@ static void assert_player_ui_payload(void) {
     ASSERT_EQ_INT(num_buttons, WOW_UI_ACTION_SLOTS);
     ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "Interface\\Icons\\Ability_Warrior_Cleave.blp");
     cursor += (DWORD)strlen((LPCSTR)test_last_unicast_buf + cursor) + 1;
-    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "Attack");
+    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "Strike");
     cursor += (DWORD)strlen((LPCSTR)test_last_unicast_buf + cursor) + 1;
     ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "1");
     cursor += (DWORD)strlen((LPCSTR)test_last_unicast_buf + cursor) + 1;
@@ -656,6 +663,61 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     }
 }
 
+/* Number-key action slots enter the existing melee/projectile runtime and publish server cooldown state. */
+static void test_wow_action_commands_bind_three_server_abilities(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, creature;
+    wowEntityLocal_t *player_local, *creature_local;
+    wowClient_t *client;
+    LPCSTR select_argv[] = { "select", "1" };
+    LPCSTR strike_argv[] = { "wow_action", "0" };
+    LPCSTR heavy_argv[] = { "wow_action", "1" };
+    LPCSTR throw_argv[] = { "wow_action", "2" };
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    creature = first_creature();
+    ASSERT_NOT_NULL(creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    client = (wowClient_t *)player->client;
+    creature->s.origin = (VECTOR3){ player->s.origin.x + 4.0f, player->s.origin.y, player->s.origin.z };
+    creature->s.origin2 = (VECTOR2){ creature->s.origin.x, creature->s.origin.y };
+    creature_local->health = creature_local->max_health = 10;
+    game->ClientBegin(player);
+    game->ClientCommand(player, 2, select_argv);
+
+    game->ClientCommand(player, 2, strike_argv);
+    ASSERT_EQ_INT((int)player_local->attack_damage, BZ_WOW_STRIKE_DAMAGE);
+    ASSERT(player_local->attack_damage_time > 0);
+    player_local->attack_time = player_local->attack_damage_time = player_local->attack_backswing_time = 0;
+    player_local->attack_damage_done = false;
+
+    player_local->power = BZ_WOW_HEAVY_STRIKE_RAGE;
+    game->ClientCommand(player, 2, heavy_argv);
+    ASSERT_EQ_INT((int)player_local->attack_damage, BZ_WOW_HEAVY_STRIKE_DAMAGE);
+    ASSERT_EQ_INT((int)player_local->power, 0);
+    ASSERT_EQ_INT((int)player_local->ability_cooldown[WOW_ABILITY_HEAVY_STRIKE],
+                  BZ_WOW_HEAVY_STRIKE_COOLDOWN);
+    player_local->attack_time = player_local->attack_damage_time = player_local->attack_backswing_time = 0;
+    player_local->attack_damage_done = false;
+
+    game->ClientCommand(player, 2, throw_argv);
+    ASSERT_EQ_INT((int)Wow_EntityLocal(&wow_edicts[globals.num_edicts - 1])->kind, WOW_ENTITY_PROJECTILE);
+    ASSERT_EQ_INT((int)player_local->ability_cooldown[WOW_ABILITY_THROW], BZ_WOW_THROW_COOLDOWN);
+    game->RunFrame();
+    ASSERT_STR_EQ(client->actions[0].name, "Strike");
+    ASSERT_STR_EQ(client->actions[1].name, "Heavy Strike");
+    ASSERT_STR_EQ(client->actions[2].name, "Throw");
+    ASSERT_EQ_INT((int)client->actions[1].rage_cost, BZ_WOW_HEAVY_STRIKE_RAGE);
+    ASSERT_EQ_INT((int)client->actions[1].cooldown, 2);
+    ASSERT_EQ_INT((int)client->actions[2].cooldown, 2);
+    ASSERT(client->actions[1].flags & WOW_ACTION_DISABLED_COOLDOWN);
+    ASSERT(client->actions[2].flags & WOW_ACTION_DISABLED_COOLDOWN);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
 /* GM exploration speeds manual travel but never bypasses mode, input, or world-bound validation. */
 static void test_wow_gm_mode_accelerates_and_guards_teleport(void) {
     struct game_export *game = init_game();
@@ -822,6 +884,7 @@ static void test_wow_player_progression_refreshes_live_hud_once(void) {
 int main(void) {
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
+    RUN_TEST(test_wow_action_commands_bind_three_server_abilities);
     RUN_TEST(test_wow_gm_mode_accelerates_and_guards_teleport);
     RUN_TEST(test_wow_quest_log_commands_toggle_server_ui);
     RUN_TEST(test_wow_zone_name_tracks_player_area);

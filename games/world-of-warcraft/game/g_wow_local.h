@@ -34,6 +34,14 @@
 #define BZ_WOW_CREATURE_REGEN_TIME 500
 #define BZ_WOW_CREATURE_RESPAWN_TIME 5000
 #define BZ_WOW_CREATURE_ATTACK_DAMAGE 1
+#define BZ_WOW_STRIKE_DAMAGE 1
+#define BZ_WOW_HEAVY_STRIKE_DAMAGE 3
+#define BZ_WOW_HEAVY_STRIKE_RAGE 20
+#define BZ_WOW_HEAVY_STRIKE_COOLDOWN 1500
+#define BZ_WOW_THROW_DAMAGE 2
+#define BZ_WOW_THROW_COOLDOWN 2000
+#define BZ_WOW_THROW_RANGE 30.0f
+#define BZ_WOW_COMBAT_MESSAGE_TIME 1500
 #define WOW_MELEE_RANGE 5.0f
 #define WOW_CAMERA_MIN_PITCH 300.0f
 #define WOW_CAMERA_MAX_PITCH 350.0f
@@ -56,6 +64,34 @@ typedef enum {
     WOW_AI_DEAD,
     WOW_AI_RESPAWN,
 } wowAiState_t;
+
+typedef enum {
+    WOW_ABILITY_STRIKE,
+    WOW_ABILITY_HEAVY_STRIKE,
+    WOW_ABILITY_THROW,
+    WOW_ABILITY_COUNT,
+} wowAbility_t;
+
+typedef enum {
+    WOW_ACTION_DISABLED_DEAD = 1 << 0,
+    WOW_ACTION_DISABLED_NO_TARGET = 1 << 1,
+    WOW_ACTION_DISABLED_TARGET_DEAD = 1 << 2,
+    WOW_ACTION_DISABLED_RANGE = 1 << 3,
+    WOW_ACTION_DISABLED_RAGE = 1 << 4,
+    WOW_ACTION_DISABLED_COOLDOWN = 1 << 5,
+} wowActionFlags_t;
+
+typedef enum {
+    WOW_COMBAT_MESSAGE_NONE,
+    WOW_COMBAT_MESSAGE_DAMAGE_DEALT,
+    WOW_COMBAT_MESSAGE_DAMAGE_TAKEN,
+    WOW_COMBAT_MESSAGE_XP,
+    WOW_COMBAT_MESSAGE_LEVEL,
+    WOW_COMBAT_MESSAGE_NO_RAGE,
+    WOW_COMBAT_MESSAGE_OUT_OF_RANGE,
+    WOW_COMBAT_MESSAGE_NO_TARGET,
+    WOW_COMBAT_MESSAGE_NOT_READY,
+} wowCombatMessageType_t;
 
 typedef struct wowMove_s {
     LPCSTR animation;
@@ -81,6 +117,7 @@ typedef struct {
     DWORD level;
     DWORD xp;
     DWORD xp_reward;
+    DWORD attack_damage;
     DWORD attack_damage_point;
     DWORD attack_backswing;
     DWORD attack_time;
@@ -90,6 +127,7 @@ typedef struct {
     DWORD death_time;
     DWORD respawn_time;
     DWORD regen_time;
+    DWORD ability_cooldown[WOW_ABILITY_COUNT];
     BOOL attack_damage_done;
     BOOL dead;
     BOOL hostile;
@@ -107,7 +145,18 @@ typedef struct {
     char icon[256];
     char name[64];
     DWORD count;
+    DWORD rage_cost;
+    DWORD cooldown;
+    DWORD flags;
 } wowHudIcon_t;
+
+typedef struct {
+    wowCombatMessageType_t type;
+    DWORD time;
+    char text[64];
+} WOWCOMBATMESSAGE;
+typedef WOWCOMBATMESSAGE *LPWOWCOMBATMESSAGE;
+typedef WOWCOMBATMESSAGE const *LPCWOWCOMBATMESSAGE;
 
 typedef struct {
     struct client_s client;
@@ -115,6 +164,8 @@ typedef struct {
     char zone_name[128];
     wowHudIcon_t inventory[WOW_UI_INVENTORY_SLOTS];
     wowHudIcon_t actions[WOW_UI_ACTION_SLOTS];
+    WOWCOMBATMESSAGE combat_message;
+    DWORD ui_flags;
     BOOL quest_log_open;
 } wowClient_t;
 
@@ -163,7 +214,9 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker);
 BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent);
 BOOL Wow_EntityAffectingCombat(LPEDICT ent);
 BOOL Wow_EntityCanBeTargeted(LPCEDICT ent);
+FLOAT Wow_Distance2(LPCVECTOR2 a, LPCVECTOR2 b);
 void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage);
+void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD value);
 void Wow_SyncEntityVitals(LPEDICT ent);
 DWORD Wow_XpForNextLevel(DWORD level);
 void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim);
@@ -181,8 +234,9 @@ void UI_HideWowQuestLog(LPEDICT ent);
 /* Ability/projectile system */
 DWORD      Wow_FireboltModel(void);
 void       Wow_RunProjectile(LPEDICT ent);
-void       Wow_FireFirebolt(LPEDICT caster, LPEDICT target);
+BOOL       Wow_FireFirebolt(LPEDICT caster, LPEDICT target);
 void       Wow_HealingTouch(LPEDICT caster);
 LPEDICT    Wow_FindSpellTarget(LPEDICT ent, FLOAT range);
+BOOL       Wow_UseAbility(LPEDICT ent, wowAbility_t ability);
 
 #endif

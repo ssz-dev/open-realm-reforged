@@ -20,6 +20,26 @@ enum {
     WOW_PLAYER_EQUIPMENT_FEET = 1
 };
 static wowMove_t wow_move_cast = { "SpellCastOmni", NULL, NULL };
+typedef struct {
+    LPCSTR icon;
+    LPCSTR name;
+    DWORD rage_cost;
+    DWORD cooldown;
+    DWORD damage;
+    FLOAT range;
+} WOWABILITYDEF;
+typedef WOWABILITYDEF *LPWOWABILITYDEF;
+typedef WOWABILITYDEF const *LPCWOWABILITYDEF;
+
+static WOWABILITYDEF const wow_ability_defs[WOW_ABILITY_COUNT] = {
+    { "Interface\\Icons\\Ability_Warrior_Cleave.blp", "Strike", 0, 0,
+      BZ_WOW_STRIKE_DAMAGE, WOW_MELEE_RANGE },
+    { "Interface\\Icons\\Ability_Warrior_Charge.blp", "Heavy Strike", BZ_WOW_HEAVY_STRIKE_RAGE,
+      BZ_WOW_HEAVY_STRIKE_COOLDOWN, BZ_WOW_HEAVY_STRIKE_DAMAGE, WOW_MELEE_RANGE },
+    { "Interface\\Icons\\Spell_Fire_FireBolt02.blp", "Throw", 0, BZ_WOW_THROW_COOLDOWN,
+      BZ_WOW_THROW_DAMAGE, BZ_WOW_THROW_RANGE },
+};
+
 static struct {
     DWORD flags;
     FLOAT yaw;
@@ -32,30 +52,18 @@ static struct {
 };
 
 static wowHudIcon_t const wow_start_inventory[WOW_UI_INVENTORY_SLOTS] = {
-    { "Interface\\Icons\\INV_Misc_Bag_08.blp", "Backpack", 1 },
-    { "Interface\\Icons\\INV_Weapon_ShortBlade_05.blp", "Short Blade", 1 },
-    { "Interface\\Icons\\INV_Misc_Food_24.blp", "Food", 5 },
-    { "Interface\\Icons\\Spell_Nature_HealingTouch.blp", "Healing Touch", 1 },
-    { "Interface\\Icons\\Ability_Warrior_BattleShout.blp", "Battle Shout", 1 },
-    { "Interface\\Icons\\INV_Misc_Coin_01.blp", "Coin", 12 },
+    { "Interface\\Icons\\INV_Misc_Bag_08.blp", "Backpack", 1, 0, 0, 0 },
+    { "Interface\\Icons\\INV_Weapon_ShortBlade_05.blp", "Short Blade", 1, 0, 0, 0 },
+    { "Interface\\Icons\\INV_Misc_Food_24.blp", "Food", 5, 0, 0, 0 },
+    { "Interface\\Icons\\Spell_Nature_HealingTouch.blp", "Healing Touch", 1, 0, 0, 0 },
+    { "Interface\\Icons\\Ability_Warrior_BattleShout.blp", "Battle Shout", 1, 0, 0, 0 },
+    { "Interface\\Icons\\INV_Misc_Coin_01.blp", "Coin", 12, 0, 0, 0 },
 };
 
-static wowHudIcon_t const wow_start_actions[WOW_UI_ACTION_SLOTS] = {
-    { "Interface\\Icons\\Ability_Warrior_Cleave.blp", "Attack", 1 },
-    { "Interface\\Icons\\Ability_Warrior_Charge.blp", "Charge", 1 },
-    { "Interface\\Icons\\Ability_Warrior_BattleShout.blp", "Battle Shout", 1 },
-    { "Interface\\Icons\\Spell_Nature_HealingTouch.blp", "Healing Touch", 1 },
-    { "Interface\\Icons\\Spell_Fire_FireBolt02.blp", "Firebolt", 1 },
-    { "Interface\\Icons\\Spell_Frost_FrostBolt02.blp", "Frostbolt", 1 },
-    { "Interface\\Icons\\INV_Weapon_ShortBlade_05.blp", "Short Blade", 1 },
-    { "Interface\\Icons\\INV_Misc_Food_24.blp", "Food", 5 },
-    { "Interface\\Icons\\INV_Potion_51.blp", "Healing Potion", 2 },
-    { "Interface\\Icons\\INV_Misc_Bag_08.blp", "Backpack", 1 },
-    { "Interface\\Icons\\Spell_Holy_MagicalSentry.blp", "Sentry", 1 },
-    { "Interface\\Icons\\INV_Misc_Coin_01.blp", "Coin", 12 },
-};
+static wowHudIcon_t const wow_start_actions[WOW_UI_ACTION_SLOTS] = { 0 };
 
 #define WOW_MISSING_ANIMATION_LOG_SLOTS 128
+#define BZ_WOW_UI_DIRTY 1
 
 typedef struct {
     DWORD model;
@@ -476,9 +484,7 @@ void Wow_AdvanceEntityFrame(LPEDICT ent) {
 static LPEDICT Wow_EdictByNumber(DWORD number);
 static LPEDICT Wow_FindNearestAttackTarget(LPEDICT ent);
 
-#define WOW_FIREBOLT_SPEED 25.0f
-#define WOW_FIREBOLT_DAMAGE 2
-#define WOW_FIREBOLT_RANGE 30.0f
+#define BZ_WOW_FIREBOLT_SPEED 25.0f
 #define WOW_HEALING_TOUCH_HEAL 2
 
 DWORD Wow_FireboltModel(void) {
@@ -543,22 +549,20 @@ void Wow_RunProjectile(LPEDICT ent) {
     }
 }
 
-void Wow_FireFirebolt(LPEDICT caster, LPEDICT target) {
+BOOL Wow_FireFirebolt(LPEDICT caster, LPEDICT target) {
     wowEntityLocal_t *caster_local;
     wowEntityLocal_t *pl;
     LPEDICT proj;
     FLOAT yaw;
 
-    if (!caster || !target || caster == target || !Wow_EntityCanBeTargeted(target)) return;
+    if (!caster || !target || caster == target || !Wow_EntityCanBeTargeted(target)) return false;
     caster_local = Wow_EntityLocal(caster);
-    if (!caster_local || caster_local->dead) {
-        return;
-    }
+    if (!caster_local || caster_local->dead) return false;
     proj = Wow_Spawn();
-    if (!proj) return;
+    if (!proj) return false;
 
     pl = Wow_EntityLocal(proj);
-    if (!pl) return;
+    if (!pl) return false;
 
     pl->kind = WOW_ENTITY_PROJECTILE;
     {
@@ -568,8 +572,8 @@ void Wow_FireFirebolt(LPEDICT caster, LPEDICT target) {
     }
     pl->projectile_target = target->s.number;
     pl->projectile_caster = caster->s.number;
-    pl->projectile_speed = WOW_FIREBOLT_SPEED;
-    pl->projectile_damage = WOW_FIREBOLT_DAMAGE;
+    pl->projectile_speed = BZ_WOW_FIREBOLT_SPEED;
+    pl->projectile_damage = BZ_WOW_THROW_DAMAGE;
     pl->projectile_yaw = yaw;
     pl->projectile_pitch = 0.0f;
 
@@ -593,6 +597,7 @@ void Wow_FireFirebolt(LPEDICT caster, LPEDICT target) {
         caster_local->attack_damage_done = true;
     }
     caster_local->enemy = target;
+    return true;
 }
 
 void Wow_HealingTouch(LPEDICT caster) {
@@ -633,6 +638,168 @@ LPEDICT Wow_FindSpellTarget(LPEDICT ent, FLOAT range) {
     return Wow_FindNearestAttackTarget(ent);
 }
 
+/* Ability targeting preserves a selected dead entity long enough for validation and feedback. */
+static LPEDICT Wow_AbilityTarget(LPEDICT ent) {
+    wowEntityLocal_t *local;
+    LPEDICT target;
+
+    if (!ent || !ent->client) return NULL;
+    if (ent->client->ps.selected_entity) {
+        target = Wow_EdictByNumber(ent->client->ps.selected_entity);
+        if (target && target != ent) return target;
+    }
+    local = Wow_EntityLocal(ent);
+    if (local && local->enemy && local->enemy != ent && local->enemy->inuse) return local->enemy;
+    return Wow_FindNearestAttackTarget(ent);
+}
+
+/* The server computes every reason a slot is disabled; the HUD only renders this bitmask. */
+static DWORD Wow_AbilityFlags(LPEDICT ent, wowAbility_t ability, LPEDICT *target_out) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    LPEDICT target = Wow_AbilityTarget(ent);
+    DWORD flags = 0;
+
+    if (target_out) *target_out = target;
+    if (!ent || !local || local->dead || !local->health) flags |= WOW_ACTION_DISABLED_DEAD;
+    if (!target) flags |= WOW_ACTION_DISABLED_NO_TARGET;
+    else if (!Wow_EntityCanBeTargeted(target)) flags |= WOW_ACTION_DISABLED_TARGET_DEAD;
+    else if (ability < WOW_ABILITY_COUNT &&
+             Wow_Distance2(&target->s.origin2, &ent->s.origin2) > wow_ability_defs[ability].range)
+        flags |= WOW_ACTION_DISABLED_RANGE;
+    if (ability < WOW_ABILITY_COUNT && local && local->power < wow_ability_defs[ability].rage_cost)
+        flags |= WOW_ACTION_DISABLED_RAGE;
+    if (ability < WOW_ABILITY_COUNT && local &&
+        (local->ability_cooldown[ability] || local->attack_damage_time || local->attack_backswing_time))
+        flags |= WOW_ACTION_DISABLED_COOLDOWN;
+    return flags;
+}
+
+/* One bounded, replace-in-place message avoids both client-owned combat truth and floating-text growth. */
+void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD value) {
+    wowEntityLocal_t *local = Wow_EntityLocal(player);
+    wowClient_t *client;
+
+    if (!player || !player->client || !local || local->kind != WOW_ENTITY_PLAYER) return;
+    client = (wowClient_t *)player->client;
+    client->combat_message.type = type;
+    client->combat_message.time = BZ_WOW_COMBAT_MESSAGE_TIME;
+    switch (type) {
+        case WOW_COMBAT_MESSAGE_DAMAGE_DEALT:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "Damage %u", (unsigned)value);
+            break;
+        case WOW_COMBAT_MESSAGE_DAMAGE_TAKEN:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "-%u Health", (unsigned)value);
+            break;
+        case WOW_COMBAT_MESSAGE_XP:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "+%u XP", (unsigned)value);
+            break;
+        case WOW_COMBAT_MESSAGE_LEVEL:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "Level %u!", (unsigned)value);
+            break;
+        case WOW_COMBAT_MESSAGE_NO_RAGE:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Not enough Rage");
+            break;
+        case WOW_COMBAT_MESSAGE_OUT_OF_RANGE:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Target out of range");
+            break;
+        case WOW_COMBAT_MESSAGE_NO_TARGET:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "No living target");
+            break;
+        case WOW_COMBAT_MESSAGE_NOT_READY:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Ability not ready");
+            break;
+        default:
+            client->combat_message.time = 0;
+            client->combat_message.text[0] = '\0';
+            break;
+    }
+    client->ui_flags |= BZ_WOW_UI_DIRTY;
+}
+
+/* Ability activation commits Rage and cooldown only after the existing attack/projectile path starts. */
+BOOL Wow_UseAbility(LPEDICT ent, wowAbility_t ability) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    LPEDICT target = NULL;
+    LPEDICT old_enemy;
+    DWORD flags, old_selection;
+
+    if (!ent || !local || ability >= WOW_ABILITY_COUNT) return false;
+    flags = Wow_AbilityFlags(ent, ability, &target);
+    if (flags) {
+        if (flags & (WOW_ACTION_DISABLED_DEAD | WOW_ACTION_DISABLED_NO_TARGET |
+                     WOW_ACTION_DISABLED_TARGET_DEAD))
+            Wow_SetCombatMessage(ent, WOW_COMBAT_MESSAGE_NO_TARGET, 0);
+        else if (flags & WOW_ACTION_DISABLED_RANGE)
+            Wow_SetCombatMessage(ent, WOW_COMBAT_MESSAGE_OUT_OF_RANGE, 0);
+        else if (flags & WOW_ACTION_DISABLED_RAGE)
+            Wow_SetCombatMessage(ent, WOW_COMBAT_MESSAGE_NO_RAGE, 0);
+        else
+            Wow_SetCombatMessage(ent, WOW_COMBAT_MESSAGE_NOT_READY, 0);
+        return false;
+    }
+
+    old_enemy = local->enemy;
+    old_selection = ent->client->ps.selected_entity;
+    local->enemy = target;
+    ent->client->ps.selected_entity = target->s.number;
+    if (ability == WOW_ABILITY_THROW) {
+        if (!Wow_FireFirebolt(ent, target)) goto failed;
+    } else {
+        if (!ent->attack) goto failed;
+        local->attack_damage = wow_ability_defs[ability].damage;
+        ent->attack(ent);
+        if (!local->attack_damage_time && !local->attack_backswing_time) goto failed;
+    }
+    local->power -= wow_ability_defs[ability].rage_cost;
+    local->ability_cooldown[ability] = wow_ability_defs[ability].cooldown;
+    Wow_SyncEntityVitals(ent);
+    return true;
+
+failed:
+    local->enemy = old_enemy;
+    local->attack_damage = BZ_WOW_STRIKE_DAMAGE;
+    ent->client->ps.selected_entity = old_selection;
+    Wow_SetCombatMessage(ent, WOW_COMBAT_MESSAGE_NOT_READY, 0);
+    return false;
+}
+
+/* Cooldowns and messages advance on server frames; HUD state changes only at visible boundaries. */
+static void Wow_UpdateAbilityTimers(LPEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    wowClient_t *client;
+
+    if (!ent || !ent->client || !local) return;
+    client = (wowClient_t *)ent->client;
+    FOR_LOOP(i, WOW_ABILITY_COUNT)
+        local->ability_cooldown[i] = local->ability_cooldown[i] > FRAMETIME
+            ? local->ability_cooldown[i] - FRAMETIME : 0;
+    if (client->combat_message.time > FRAMETIME) {
+        client->combat_message.time -= FRAMETIME;
+    } else if (client->combat_message.time) {
+        client->combat_message.time = 0;
+        client->combat_message.type = WOW_COMBAT_MESSAGE_NONE;
+        client->combat_message.text[0] = '\0';
+        client->ui_flags |= BZ_WOW_UI_DIRTY;
+    }
+}
+
+/* Copy quantized server ability state into the native HUD model without rebuilding every frame. */
+static BOOL Wow_UpdateActionHud(LPEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    wowClient_t *client = (wowClient_t *)ent->client;
+    BOOL changed = false;
+
+    FOR_LOOP(i, WOW_ABILITY_COUNT) {
+        DWORD cooldown = local->ability_cooldown[i] ? (local->ability_cooldown[i] + 999) / 1000 : 0;
+        DWORD flags = Wow_AbilityFlags(ent, (wowAbility_t)i, NULL);
+
+        if (client->actions[i].cooldown != cooldown || client->actions[i].flags != flags) changed = true;
+        client->actions[i].cooldown = cooldown;
+        client->actions[i].flags = flags;
+    }
+    return changed;
+}
+
 static void Wow_UpdateCamera(LPEDICT ent) {
     if (!ent || !ent->client) {
         return;
@@ -666,8 +833,9 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
     stats[WOW_STAT_XP] = (USHORT)local->xp;
     stats[WOW_STAT_XP_MAX] = (USHORT)Wow_XpForNextLevel(local->level);
     stats[WOW_STAT_COPPER] = 1234;
-    hud_changed = memcmp(ps->stats, stats, sizeof(stats)) != 0;
+    hud_changed = (wc->ui_flags & BZ_WOW_UI_DIRTY) || memcmp(ps->stats, stats, sizeof(stats)) != 0;
     memcpy(ps->stats, stats, sizeof(stats));
+    if (Wow_UpdateActionHud(ent)) hud_changed = true;
     zone = CM_WowAreaNameAtPoint(ent->s.origin.x, ent->s.origin.y);
     mapinfo = CM_GetMapInfo();
     if (!zone || !*zone)
@@ -678,7 +846,10 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
         hud_changed = true;
     }
     /* Server-owned vitals and zone labels only rebuild the HUD when their displayed values change. */
-    if (hud_changed && ps->client_ui_state == CLIENT_UI_GAME) UI_WriteWowHud(ent);
+    if (hud_changed && ps->client_ui_state == CLIENT_UI_GAME) {
+        UI_WriteWowHud(ent);
+        wc->ui_flags &= ~BZ_WOW_UI_DIRTY;
+    }
 }
 
 static void Wow_WriteHudIcon(wowHudIcon_t const *icon, DWORD slot) {
@@ -904,6 +1075,7 @@ static void Wow_InitPlayer(LPEDICT ent) {
         local->health = local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
         local->max_power = BZ_WOW_PLAYER_MAX_POWER;
         local->level = 1;
+        local->attack_damage = BZ_WOW_STRIKE_DAMAGE;
         local->attack_damage_point = 250;
         local->attack_backswing = 450;
     }
@@ -939,8 +1111,16 @@ static void Wow_InitPlayer(LPEDICT ent) {
     snprintf(wow_clients[0].name, sizeof(wow_clients[0].name), "%s", "Thrall");
     memcpy(wow_clients[0].inventory, wow_start_inventory, sizeof(wow_start_inventory));
     memcpy(wow_clients[0].actions, wow_start_actions, sizeof(wow_start_actions));
-    fprintf(stderr, "WoW: action bar initialized — slot 4 (key 5) = %s\n",
-            wow_start_actions[4].name[0] ? wow_start_actions[4].name : "(empty)");
+    FOR_LOOP(i, WOW_ABILITY_COUNT) {
+        wowHudIcon_t *icon = &wow_clients[0].actions[i];
+        LPCWOWABILITYDEF ability = &wow_ability_defs[i];
+
+        snprintf(icon->icon, sizeof(icon->icon), "%s", ability->icon);
+        snprintf(icon->name, sizeof(icon->name), "%s", ability->name);
+        icon->count = 1;
+        icon->rage_cost = ability->rage_cost;
+    }
+    fprintf(stderr, "WoW: action bar initialized — 1 Strike, 2 Heavy Strike, 3 Throw\n");
 #ifdef WOW
     ps->origin = wow_spawn_origin;
     ps->viewangles = (VECTOR3){ Wow_ViewPitch(wow_move.pitch), wow_move.yaw, 0.0f };
@@ -1124,6 +1304,7 @@ static void Wow_RunFrame(void) {
         return;
     }
     player_local = Wow_EntityLocal(ent);
+    Wow_UpdateAbilityTimers(ent);
     if (player_local && player_local->dead) {
         (void)Wow_AIAdvanceLockedFrame(ent);
         Wow_UpdateCamera(ent);
@@ -1332,24 +1513,8 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
     } else if (argc >= 2 && !strcasecmp(argv[0], "wow_action")) {
         DWORD slot = (DWORD)strtoul(argv[1], NULL, 10);
 
-        switch (slot) {
-            case 3: /* Healing Touch */
-                Wow_HealingTouch(ent);
-                break;
-            case 4: /* Firebolt */
-                {
-                    LPEDICT target = Wow_FindSpellTarget(ent, WOW_FIREBOLT_RANGE);
-                    if (target) {
-                        Wow_FireFirebolt(ent, target);
-                    } else {
-                        fprintf(stderr, "WoW: Firebolt — no target in range %.1f\n", WOW_FIREBOLT_RANGE);
-                    }
-                }
-                break;
-            default:
-                fprintf(stderr, "WoW: unhandled action slot %u\n", (unsigned)slot);
-                break;
-        }
+        if (slot < WOW_ABILITY_COUNT) (void)Wow_UseAbility(ent, (wowAbility_t)slot);
+        else fprintf(stderr, "WoW: unhandled action slot %u\n", (unsigned)slot);
     }
 }
 
@@ -1368,6 +1533,7 @@ static void Wow_ClientBegin(LPEDICT ent) {
     ent->client->ps.client_ui_state = CLIENT_UI_GAME;
     Wow_SendPlayerUi(ent);
     UI_WriteWowHud(ent);
+    ((wowClient_t *)ent->client)->ui_flags &= ~BZ_WOW_UI_DIRTY;
     UI_HideWowQuestLog(ent);
 }
 

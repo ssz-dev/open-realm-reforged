@@ -17,6 +17,8 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 - ADT-oriented terrain renderer code for map tiles, splats, alpha layers, terrain state, and object paths.
 - M2 model loading/rendering path, including fallback handling for missing models.
 - Creature combat with proximity/damage aggro, chase, timed melee attacks, leash/evade, death, and respawn.
+- Server-authoritative Strike, Heavy Strike, and Throw actions with Rage costs, cooldowns, combat feedback, and
+  projectile kill credit.
 - Loading-screen UI with WoW textures, fonts, loading title/status text, and progress display.
 - DBC helpers for selected loading-screen and map metadata lookup.
 - Server-authored in-game HUD with a live player profile, ADT minimap, GM controls, and an interactive empty quest log.
@@ -25,7 +27,7 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 ## Partial
 
 - Terrain rendering is the core focus; object placement, animation polish, lighting, and exact client parity are incomplete.
-- Entity simulation exists only as lightweight scaffolding compared with the Warcraft III game target.
+- Entity simulation remains intentionally compact compared with the Warcraft III game target.
 - Loading screens are functional but intentionally narrow.
 - Data compatibility is tied to the locally available WoW client data layout used during development.
 

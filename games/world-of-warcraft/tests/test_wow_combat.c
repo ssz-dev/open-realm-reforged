@@ -31,6 +31,12 @@ static animation_t g_death_anim = {
 static DWORD g_pain_calls = 0;
 static struct client_s g_player_client;
 
+void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD value) {
+    (void)player;
+    (void)type;
+    (void)value;
+}
+
 FLOAT Wow_TerrainHeight(FLOAT x, FLOAT y) {
     (void)x;
     (void)y;

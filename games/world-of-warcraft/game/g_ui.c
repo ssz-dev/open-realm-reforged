@@ -25,6 +25,15 @@ typedef struct {
     RECT rect;
 } wowHudButton_t;
 
+typedef struct {
+    FLOAT x, y;
+    DWORD image_index;
+    DWORD slot;
+    wowHudIcon_t const *icon;
+} WOWACTIONDRAW;
+typedef WOWACTIONDRAW *LPWOWACTIONDRAW;
+typedef WOWACTIONDRAW const *LPCWOWACTIONDRAW;
+
 static DWORD ui_next_frame_number;
 
 static void UI_SetFramePoint(uiFramePoint_t *point, uiFramePointPos_t target, DWORD relative,
@@ -183,31 +192,51 @@ static void UI_WriteActionBar(void) {
                     1.0f, 0.0f, 0.0f, 1.0f, COLOR32_WHITE);
 }
 
-/* Action button slot at grid position i (0..11 = left row, 12..15 = right empty slots) */
-static void UI_WriteActionButtonSlot(FLOAT x, FLOAT y, DWORD image_index, DWORD count) {
-    char count_buf[16];
+/* Action slots expose only a server command and render server-owned cost, cooldown, and disabled state. */
+static void UI_WriteActionButtonSlot(LPCWOWACTIONDRAW draw) {
+    char command[32], count_buf[16], cost_buf[16], cooldown_buf[16], hotkey_buf[2];
+    wowHudIcon_t const *icon = draw->icon;
 
     /* Slot frame */
     UI_WriteImage("Interface\\Buttons\\UI-Quickslot2.blp",
-                  x + PX(-14), y + PY(-13), PW(64), PH(64), COLOR32_WHITE);
+                  draw->x + PX(-14), draw->y + PY(-13), PW(64), PH(64), COLOR32_WHITE);
     /* Icon (may be 0 = empty slot, renderer draws nothing for index 0) */
-    if (image_index) {
-        uiFrame_t icon;
-        memset(&icon, 0, sizeof(icon));
-        icon.flags.type = FT_TEXTURE;
-        icon.color = COLOR32_WHITE;
-        icon.tex.index = image_index;
-        icon.tex.coord[1] = 0xff;
-        icon.tex.coord[3] = 0xff;
-        UI_SetFrameRect(&icon, x + PX(2), y + PY(2), PW(32), PH(32));
-        UI_WriteProxyFrame(&icon, NULL, 0);
+    if (draw->image_index && icon) {
+        uiFrame_t frame;
+
+        snprintf(command, sizeof(command), "wow_action %u", (unsigned)draw->slot);
+        memset(&frame, 0, sizeof(frame));
+        frame.flags.type = FT_TEXTURE;
+        frame.color = icon->flags ? MAKE(COLOR32, 110, 110, 110, 255) : COLOR32_WHITE;
+        frame.tex.index = draw->image_index;
+        frame.tex.coord[1] = 0xff;
+        frame.tex.coord[3] = 0xff;
+        frame.tooltip = icon->name;
+        frame.onclick = command;
+        UI_SetFrameRect(&frame, draw->x + PX(2), draw->y + PY(2), PW(32), PH(32));
+        UI_WriteProxyFrame(&frame, NULL, 0);
+        if (icon->flags)
+            UI_WriteColorRect(draw->x + PX(2), draw->y + PY(2), PW(32), PH(32),
+                              MAKE(COLOR32, 0, 0, 0, 135));
     }
-    /* The old Lua HUD drew stack counts in the corner of action buttons; keep
-     * the server-authored HUD visually identical by writing the same overlay. */
-    if (count > 1) {
-        snprintf(count_buf, sizeof(count_buf), "%u", (unsigned)count);
-        UI_WriteTextFrame(x + PX(2), y + PY(23), PW(32), PH(10),
+    if (!icon) return;
+    hotkey_buf[0] = draw->slot < 9 ? (char)('1' + draw->slot) : '0';
+    hotkey_buf[1] = '\0';
+    UI_WriteTextFrame(draw->x + PX(3), draw->y + PY(2), PW(12), PH(10),
+                      hotkey_buf, COLOR32_WHITE, FONT_JUSTIFYLEFT);
+    if (icon->rage_cost) {
+        snprintf(cost_buf, sizeof(cost_buf), "%uR", (unsigned)icon->rage_cost);
+        UI_WriteTextFrame(draw->x + PX(2), draw->y + PY(23), PW(31), PH(10),
+                          cost_buf, MAKE(COLOR32, 255, 190, 80, 255), FONT_JUSTIFYRIGHT);
+    } else if (icon->count > 1) {
+        snprintf(count_buf, sizeof(count_buf), "%u", (unsigned)icon->count);
+        UI_WriteTextFrame(draw->x + PX(2), draw->y + PY(23), PW(32), PH(10),
                           count_buf, COLOR32_WHITE, FONT_JUSTIFYRIGHT);
+    }
+    if (icon->cooldown) {
+        snprintf(cooldown_buf, sizeof(cooldown_buf), "%us", (unsigned)icon->cooldown);
+        UI_WriteTextFrame(draw->x + PX(2), draw->y + PY(11), PW(32), PH(12),
+                          cooldown_buf, COLOR32_WHITE, FONT_JUSTIFYCENTER);
     }
 }
 
@@ -339,12 +368,26 @@ void UI_WriteWowHud(LPEDICT ent) {
     /* 12 action buttons, left row */
     FOR_LOOP(i, 12) {
         DWORD img = wc->actions[i].icon[0] ? gi.ImageIndex(wc->actions[i].icon) : 0;
-        UI_WriteActionButtonSlot(PX(8.0f + (FLOAT)i * 42.0f), PY(728), img, wc->actions[i].count);
+        WOWACTIONDRAW draw = {
+            PX(8.0f + (FLOAT)i * 42.0f), PY(728), img, i,
+            wc->actions[i].icon[0] ? &wc->actions[i] : NULL
+        };
+
+        UI_WriteActionButtonSlot(&draw);
     }
 
     /* 4 empty button slots, right side */
-    FOR_LOOP(i, 4)
-        UI_WriteActionButtonSlot(PX(939.0f - (FLOAT)i * 42.0f), PY(728), 0, 0);
+    FOR_LOOP(i, 4) {
+        WOWACTIONDRAW draw = { PX(939.0f - (FLOAT)i * 42.0f), PY(728), 0, 12 + i, NULL };
+
+        UI_WriteActionButtonSlot(&draw);
+    }
+
+    if (wc->combat_message.time && wc->combat_message.text[0]) {
+        UI_WriteColorRect(PX(362), PY(86), PW(300), PH(24), MAKE(COLOR32, 5, 8, 12, 190));
+        UI_WriteTextFrame(PX(370), PY(91), PW(284), PH(16), wc->combat_message.text,
+                          MAKE(COLOR32, 255, 220, 135, 255), FONT_JUSTIFYCENTER);
+    }
 
     /* Backpack */
     UI_WriteImage("Interface\\Buttons\\Button-Backpack-Up.blp",

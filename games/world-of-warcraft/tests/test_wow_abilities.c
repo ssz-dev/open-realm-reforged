@@ -14,6 +14,13 @@ int _tests_failed = 0;
 
 static DWORD test_clear_world_calls;
 static DWORD test_apply_lobby_calls;
+static animation_t test_animations[] = {
+    { .name = "Stand", .interval = { 0, 1000 } },
+    { .name = "Ready1H", .interval = { 0, 1000 } },
+    { .name = "Attack1H", .interval = { 0, 1000 } },
+    { .name = "SpellCastOmni", .interval = { 0, 1000 } },
+    { .name = "Death", .interval = { 0, 1000 } },
+};
 
 /* Stub: G_RegisterModel returns model index = index+1 (non-zero = found). */
 int G_RegisterModel(LPCSTR filename) {
@@ -24,7 +31,8 @@ int G_RegisterModel(LPCSTR filename) {
 
 LPCANIMATION G_GetAnimation(DWORD modelindex, LPCSTR animname) {
     (void)modelindex;
-    (void)animname;
+    FOR_LOOP(i, sizeof(test_animations) / sizeof(test_animations[0]))
+        if (!strcasecmp(test_animations[i].name, animname)) return &test_animations[i];
     return NULL;
 }
 
@@ -208,6 +216,7 @@ static LPEDICT make_player(void) {
 
         ent->client = &wow_clients[0].client;
         ent->s.number = 0;
+        ent->s.model = 1;
         ent->inuse = true;
         local->kind = WOW_ENTITY_PLAYER;
         local->health = 50;
@@ -245,6 +254,7 @@ static LPEDICT make_creature(FLOAT x, FLOAT y) {
         local->level = 1;
         local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
         local->hostile = true;
+        ent->s.model = 1;
         ent->idle = Wow_AIIdle;
         ent->attack = Wow_AIAttack;
         ent->pain = Wow_AIPain;
@@ -256,6 +266,26 @@ static LPEDICT make_creature(FLOAT x, FLOAT y) {
         ent->svflags = SVF_MONSTER;
     }
     return ent;
+}
+
+static void select_target(LPEDICT player, LPEDICT target) {
+    player->client->ps.selected_entity = target ? target->s.number : 0;
+}
+
+static void run_melee_damage_point(LPEDICT player) {
+    DWORD frames = 20;
+
+    while (Wow_EntityLocal(player)->attack_damage_time && frames--)
+        (void)Wow_AIAdvanceLockedFrame(player);
+    ASSERT(frames > 0);
+}
+
+static DWORD count_projectiles(void) {
+    DWORD count = 0;
+
+    for (DWORD i = WOW_MAX_CLIENTS; i < (DWORD)globals.num_edicts; i++)
+        if (wow_edicts[i].inuse && Wow_EntityLocal(&wow_edicts[i])->kind == WOW_ENTITY_PROJECTILE) count++;
+    return count;
 }
 
 /* ---- Ability tests ---- */
@@ -547,6 +577,143 @@ static void test_find_spell_target_returns_null_when_out_of_range(void) {
     ASSERT_NULL(result);
 }
 
+static void test_strike_uses_shared_melee_damage_once(void) {
+    LPEDICT player = make_player();
+    LPEDICT target = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *target_local = Wow_EntityLocal(target);
+
+    select_target(player, target);
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_STRIKE));
+    ASSERT_EQ_INT((int)target_local->health, 3);
+    run_melee_damage_point(player);
+    ASSERT_EQ_INT((int)target_local->health, 2);
+    ASSERT_EQ_INT((int)player_local->power, 5);
+    ASSERT_EQ_INT((int)((wowClient_t *)player->client)->combat_message.type,
+                  WOW_COMBAT_MESSAGE_DAMAGE_DEALT);
+    (void)Wow_AIAdvanceLockedFrame(player);
+    ASSERT_EQ_INT((int)target_local->health, 2);
+}
+
+static void test_strike_rejects_missing_dead_and_distant_targets(void) {
+    LPEDICT player = make_player();
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowClient_t *client = (wowClient_t *)player->client;
+
+    ASSERT(!Wow_UseAbility(player, WOW_ABILITY_STRIKE));
+    ASSERT_EQ_INT((int)player_local->power, 0);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_NO_TARGET);
+    {
+        LPEDICT target = make_creature(4.0f, 0.0f);
+        wowEntityLocal_t *target_local = Wow_EntityLocal(target);
+
+        target_local->dead = true;
+        target_local->health = 0;
+        select_target(player, target);
+        ASSERT(!Wow_UseAbility(player, WOW_ABILITY_STRIKE));
+        ASSERT_EQ_INT((int)target_local->health, 0);
+        ASSERT_EQ_INT((int)player_local->power, 0);
+        ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_NO_TARGET);
+        target_local->dead = false;
+        target_local->health = target_local->max_health;
+        target->s.origin.x = target->s.origin2.x = WOW_MELEE_RANGE + 1.0f;
+        ASSERT(!Wow_UseAbility(player, WOW_ABILITY_STRIKE));
+        ASSERT_EQ_INT((int)target_local->health, (int)target_local->max_health);
+        ASSERT_EQ_INT((int)player_local->power, 0);
+        ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_OUT_OF_RANGE);
+    }
+}
+
+static void test_heavy_strike_consumes_rage_once_and_obeys_cooldown(void) {
+    LPEDICT player = make_player();
+    LPEDICT target = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *target_local = Wow_EntityLocal(target);
+
+    target_local->health = target_local->max_health = 10;
+    player_local->power = 30;
+    select_target(player, target);
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_HEAVY_STRIKE));
+    ASSERT_EQ_INT((int)player_local->power, 10);
+    ASSERT_EQ_INT((int)player_local->ability_cooldown[WOW_ABILITY_HEAVY_STRIKE],
+                  BZ_WOW_HEAVY_STRIKE_COOLDOWN);
+    ASSERT_EQ_INT((int)target_local->health, 10);
+    run_melee_damage_point(player);
+    ASSERT_EQ_INT((int)target_local->health, 7);
+    ASSERT_EQ_INT((int)player_local->power, 25);
+    ASSERT(!Wow_UseAbility(player, WOW_ABILITY_HEAVY_STRIKE));
+    ASSERT_EQ_INT((int)target_local->health, 7);
+    ASSERT_EQ_INT((int)player_local->power, 25);
+}
+
+static void test_heavy_strike_rejects_insufficient_rage_without_mutation(void) {
+    LPEDICT player = make_player();
+    LPEDICT target = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *target_local = Wow_EntityLocal(target);
+    wowClient_t *client = (wowClient_t *)player->client;
+
+    player_local->power = BZ_WOW_HEAVY_STRIKE_RAGE - 1;
+    select_target(player, target);
+    ASSERT(!Wow_UseAbility(player, WOW_ABILITY_HEAVY_STRIKE));
+    ASSERT_EQ_INT((int)player_local->power, BZ_WOW_HEAVY_STRIKE_RAGE - 1);
+    ASSERT_EQ_INT((int)target_local->health, 3);
+    ASSERT_EQ_INT((int)player_local->ability_cooldown[WOW_ABILITY_HEAVY_STRIKE], 0);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_NO_RAGE);
+}
+
+static void test_throw_cooldown_prevents_duplicate_projectiles(void) {
+    LPEDICT player = make_player();
+    LPEDICT target = make_creature(10.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+
+    select_target(player, target);
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_THROW));
+    ASSERT_EQ_INT((int)count_projectiles(), 1);
+    ASSERT_EQ_INT((int)player_local->ability_cooldown[WOW_ABILITY_THROW], BZ_WOW_THROW_COOLDOWN);
+    ASSERT(!Wow_UseAbility(player, WOW_ABILITY_THROW));
+    ASSERT_EQ_INT((int)count_projectiles(), 1);
+}
+
+static void test_throw_projectile_kill_credits_xp_once(void) {
+    LPEDICT player = make_player();
+    LPEDICT target = make_creature(10.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *target_local = Wow_EntityLocal(target);
+    LPEDICT projectile;
+    DWORD frames = 200;
+
+    target_local->health = 2;
+    select_target(player, target);
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_THROW));
+    projectile = &wow_edicts[2];
+    while (projectile->inuse && frames--) Wow_RunProjectile(projectile);
+    ASSERT(frames > 0);
+    ASSERT(target_local->dead);
+    ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+    Wow_RunProjectile(projectile);
+    ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+    ASSERT_EQ_INT((int)((wowClient_t *)player->client)->combat_message.type, WOW_COMBAT_MESSAGE_XP);
+}
+
+static void test_received_damage_and_level_up_publish_bounded_feedback(void) {
+    LPEDICT player = make_player();
+    LPEDICT creature = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowClient_t *client = (wowClient_t *)player->client;
+
+    Wow_DealDamage(player, creature, 2);
+    ASSERT_EQ_INT((int)player_local->health, 48);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_DAMAGE_TAKEN);
+    ASSERT_STR_EQ(client->combat_message.text, "-2 Health");
+    player_local->xp = Wow_XpForNextLevel(1) - BZ_WOW_CREATURE_KILL_XP;
+    Wow_AwardKillXp(player, creature);
+    ASSERT_EQ_INT((int)player_local->level, 2);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_LEVEL);
+    ASSERT_STR_EQ(client->combat_message.text, "Level 2!");
+    ASSERT_EQ_INT((int)client->combat_message.time, BZ_WOW_COMBAT_MESSAGE_TIME);
+}
+
 int main(void) {
     RUN_TEST(test_firebolt_spawns_projectile);
     RUN_TEST(test_firebolt_homing_moves_toward_target);
@@ -563,5 +730,12 @@ int main(void) {
     RUN_TEST(test_find_spell_target_uses_selected_entity);
     RUN_TEST(test_find_spell_target_falls_back_to_nearest);
     RUN_TEST(test_find_spell_target_returns_null_when_out_of_range);
+    RUN_TEST(test_strike_uses_shared_melee_damage_once);
+    RUN_TEST(test_strike_rejects_missing_dead_and_distant_targets);
+    RUN_TEST(test_heavy_strike_consumes_rage_once_and_obeys_cooldown);
+    RUN_TEST(test_heavy_strike_rejects_insufficient_rage_without_mutation);
+    RUN_TEST(test_throw_cooldown_prevents_duplicate_projectiles);
+    RUN_TEST(test_throw_projectile_kill_credits_xp_once);
+    RUN_TEST(test_received_damage_and_level_up_publish_bounded_feedback);
     TEST_RESULTS();
 }

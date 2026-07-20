@@ -199,6 +199,7 @@ static void Wow_MonsterStart(LPEDICT ent,
     local->health = local->max_health = BZ_WOW_CREATURE_BASE_HEALTH;
     local->level = 1;
     local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    local->attack_damage = BZ_WOW_CREATURE_ATTACK_DAMAGE;
     local->attack_damage_point = 250;
     local->attack_backswing = 450;
     ent->svflags |= SVF_MONSTER;
