@@ -1,4 +1,7 @@
 #include "cl_input_local.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef WOW
 #define WOW_MOVE_FORWARD 1
@@ -207,7 +210,25 @@ static void IN_MoveRightUp(void) {
     wow_input.move_right = false;
 }
 
+/* The local developer cvar mirrors its state to the authoritative server-side profiler. */
+static void IN_WowWorldProfile_f(void) {
+    BOOL enabled = Cvar_Integer("wow_world_profile", 0) != 0;
+
+    if (Cmd_Argc() > 2 || (Cmd_Argc() == 2 && strcmp(Cmd_Argv(1), "0") && strcmp(Cmd_Argv(1), "1"))) {
+        fprintf(stderr, "usage: wow_world_profile [0|1]\n");
+        return;
+    }
+    if (Cmd_Argc() == 2) {
+        enabled = atoi(Cmd_Argv(1)) != 0;
+        Cvar_Set("wow_world_profile", enabled ? "1" : "0");
+    }
+    MSG_WriteByte(&cls.netchan.message, clc_stringcmd);
+    SZ_Printf(&cls.netchan.message, "world_profile_enable %u", (unsigned)enabled);
+    fprintf(stderr, "OpenWoW world profile: %s\n", enabled ? "enabled" : "disabled");
+}
+
 void CL_InputModeInit(void) {
+    Cvar_Get("wow_world_profile", "0", 0);
     Cmd_AddCommand("+wowleft", IN_WowLeftDown);
     Cmd_AddCommand("-wowleft", IN_WowLeftUp);
     Cmd_AddCommand("+wowselect", IN_WowSelectDown);
@@ -224,6 +245,9 @@ void CL_InputModeInit(void) {
     Cmd_AddCommand("-moveleft", IN_MoveLeftUp);
     Cmd_AddCommand("+moveright", IN_MoveRightDown);
     Cmd_AddCommand("-moveright", IN_MoveRightUp);
+    Cmd_AddCommand("wow_world_profile", IN_WowWorldProfile_f);
+    Cmd_AddCommand("world_profile", NULL);
+    Cmd_AddCommand("world_profile_reset", NULL);
 }
 
 void CL_InputModeSetGameplay(void) {

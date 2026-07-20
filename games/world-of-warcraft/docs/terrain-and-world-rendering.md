@@ -85,6 +85,28 @@ roofs as competing candidates. `CM_WowSweepWorld` performs swept
 capsule-shaped obstacle queries with instance/group bounds as broadphase and
 `MOBN`/`MOBR` triangle geometry as narrowphase.
 
+### World-query profiler
+
+The disabled-by-default `wow_world_profile` developer cvar instruments that
+same query path without allocating per query. Use:
+
+```text
+wow_world_profile 1
+world_profile_reset
+world_profile
+```
+
+The summary reports terrain LRU behavior, ground and sweep volume, WMO
+broadphase/narrowphase work, LOS, projectile wall hits, and obstacle-navigation
+fallbacks. The first non-empty summary captures observed candidate, triangle,
+and cache-miss baselines; later summaries warn only when an interval exceeds
+that observed workload. `world_profile_reset` clears every counter and peak but
+retains this baseline for interval comparison. Warnings are summary-only and
+never alter gameplay. `wow_world_profile 0` disables collection while leaving
+all query results unchanged. The shared query layer has no stable sub-frame
+timer; the server clock advances per frame, so this profiler deliberately
+records work counts rather than misleading per-query durations.
+
 ## Doodads And WMOs
 
 ADT object rendering remains renderer-owned:

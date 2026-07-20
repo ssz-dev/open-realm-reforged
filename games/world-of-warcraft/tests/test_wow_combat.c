@@ -333,8 +333,10 @@ static void test_wow_walls_block_proximity_aggro_and_melee_start(void) {
     LPEDICT player;
     LPEDICT creature;
     wowEntityLocal_t *local;
+    WOWWORLDPROFILE profile;
 
     test_prepare_player_creature(&player, &creature);
+    CM_WowWorldProfileInit(true);
     local = Wow_EntityLocal(creature);
     creature->s.origin2.x = creature->s.origin.x = 2.0f;
     local->home = creature->s.origin2;
@@ -354,6 +356,10 @@ static void test_wow_walls_block_proximity_aggro_and_melee_start(void) {
     Wow_AIAttack(creature);
     ASSERT_EQ_INT((int)local->attack_damage_time, 200);
     ASSERT_EQ_INT((int)local->attack_backswing_time, 300);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_LOS_QUERIES] >= 5);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_BLOCKED_LOS_QUERIES] >= 3);
+    CM_WowWorldProfileEnable(false);
 }
 
 static void test_wow_wall_at_damage_point_cancels_melee_hit(void) {
@@ -515,11 +521,19 @@ static void test_wow_creature_aggros_and_chases_player_by_proximity(void) {
     LPEDICT player;
     LPEDICT creature;
     wowEntityLocal_t *local;
+    WOWWORLDPROFILE profile;
     FLOAT before;
 
     test_prepare_player_creature(&player, &creature);
-    creature->s.origin2.x = creature->s.origin.x = 10.0f;
+    CM_WowWorldProfileInit(true);
+    creature->s.origin2.x = creature->s.origin.x = BZ_WOW_CREATURE_AGGRO_RANGE + 1.0f;
     local = Wow_EntityLocal(creature);
+    local->home = creature->s.origin2;
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_IDLE);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_DISTANCE_REJECTS], 1);
+    creature->s.origin2.x = creature->s.origin.x = 10.0f;
     local->home = creature->s.origin2;
     Wow_AIRunFrame(creature);
     ASSERT_EQ_INT((int)local->ai_state, WOW_AI_AGGRO);
@@ -528,6 +542,7 @@ static void test_wow_creature_aggros_and_chases_player_by_proximity(void) {
     Wow_AIRunFrame(creature);
     ASSERT_EQ_INT((int)local->ai_state, WOW_AI_CHASE);
     ASSERT(creature->s.origin.x < before);
+    CM_WowWorldProfileEnable(false);
 }
 
 static void test_wow_creature_aggros_from_player_damage_outside_proximity(void) {
@@ -651,8 +666,10 @@ static void test_wow_creature_retains_clear_local_steering(void) {
     wowEntityLocal_t *local;
     FLOAT first_y;
     SHORT steer_sign;
+    WOWWORLDPROFILE profile;
 
     test_prepare_player_creature(&player, &creature);
+    CM_WowWorldProfileInit(true);
     local = Wow_EntityLocal(creature);
     player->s.origin2 = (VECTOR2){ 10.0f, 0.0f };
     player->s.origin.x = 10.0f;
@@ -668,6 +685,8 @@ static void test_wow_creature_retains_clear_local_steering(void) {
     ASSERT_EQ_INT((int)local->obstacle.state, WOW_AI_PATH_STEER);
     ASSERT_EQ_FLOAT(creature->s.origin.x, 0.0f, 0.001f);
     ASSERT_EQ_FLOAT(creature->s.origin.y, 0.0f, 0.001f);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_STEERING_PROBES], 4);
     steer_sign = local->obstacle.steer_sign;
     Wow_AIRunFrame(creature);
     first_y = creature->s.origin.y;
@@ -679,6 +698,7 @@ static void test_wow_creature_retains_clear_local_steering(void) {
     }
     ASSERT(fabsf(creature->s.origin.y) > fabsf(first_y));
     ASSERT(local->obstacle.steer_time > 0);
+    CM_WowWorldProfileEnable(false);
 }
 
 static void test_wow_blocked_creature_recovers_then_evades_without_teleport(void) {
@@ -686,8 +706,10 @@ static void test_wow_blocked_creature_recovers_then_evades_without_teleport(void
     LPEDICT creature;
     wowEntityLocal_t *local;
     VECTOR2 blocked_at, last_valid;
+    WOWWORLDPROFILE profile;
 
     test_prepare_player_creature(&player, &creature);
+    CM_WowWorldProfileInit(true);
     local = Wow_EntityLocal(creature);
     player->s.origin2 = (VECTOR2){ 20.0f, 0.0f };
     player->s.origin.x = 20.0f;
@@ -714,6 +736,11 @@ static void test_wow_blocked_creature_recovers_then_evades_without_teleport(void
     ASSERT_NULL(local->enemy);
     ASSERT_EQ_FLOAT(creature->s.origin.x, blocked_at.x, 0.001f);
     ASSERT_EQ_FLOAT(creature->s.origin.y, blocked_at.y, 0.001f);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_AI_STEERING_PROBES] >= 4);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_STUCK_RECOVERIES] >= 1);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_EVADE_FALLBACKS], 1);
+    CM_WowWorldProfileEnable(false);
 }
 
 static void test_wow_creature_death_awards_once_and_respawns_clean(void) {

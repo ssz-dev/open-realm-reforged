@@ -4,6 +4,7 @@
 
 #define GAME_WORLD 1
 #include "common/world.c"
+#include "common/wow_world_profile.c"
 #include "common/wow_collision_wow.c"
 #include "common/world_wow.c"
 

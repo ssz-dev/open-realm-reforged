@@ -35,11 +35,13 @@ static DWORD test_unicast_calls;
 static DWORD test_hud_write_calls;
 static DWORD test_quest_show_calls;
 static DWORD test_quest_hide_calls;
+static DWORD test_mem_alloc_calls;
 static DWORD test_adt_reads;
 static DWORD test_wmo_root_reads;
 static DWORD test_wmo_group_reads;
 static BOOL test_wmo_fixture_enabled;
 static BOOL test_wmo_bsp_enabled;
+static BOOL test_world_profile_enabled;
 static char test_last_error[512];
 static char test_save_path[MAX_PATHLEN];
 
@@ -68,6 +70,7 @@ static LPCSTR test_get_configstring(DWORD index) {
 /* ---- cvar stub ---- */
 static LPCSTR test_cvar_string(LPCSTR name, LPCSTR fallback) {
     if (name && !strcasecmp(name, "wow_save")) return test_save_path;
+    if (name && !strcasecmp(name, "wow_world_profile")) return test_world_profile_enabled ? "1" : "0";
     return fallback ? fallback : "";
 }
 
@@ -456,6 +459,7 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
 }
 
 static HANDLE test_mem_alloc(long size) {
+    test_mem_alloc_calls++;
     return calloc(1, (size_t)size);
 }
 
@@ -693,11 +697,13 @@ static void reset_test_state(void) {
     test_hud_write_calls = 0;
     test_quest_show_calls = 0;
     test_quest_hide_calls = 0;
+    test_mem_alloc_calls = 0;
     test_adt_reads = 0;
     test_wmo_root_reads = 0;
     test_wmo_group_reads = 0;
     test_wmo_fixture_enabled = false;
     test_wmo_bsp_enabled = false;
+    test_world_profile_enabled = false;
     memset(test_last_error, 0, sizeof(test_last_error));
     memset(test_configstrings, 0, sizeof(test_configstrings));
     test_save_path[0] = '\0';
@@ -907,6 +913,83 @@ static void test_wow_wmo_world_query_handles_floors_ramp_walls_and_door(void) {
     if (game->Shutdown) game->Shutdown();
 }
 
+/* One static profiler observes the existing hot query path without allocation or result changes. */
+static void test_wow_world_profile_counts_resets_and_preserves_queries(void) {
+    struct game_export *game = init_game();
+    WOWGROUNDQUERY ground_query = {
+        .origin = { 100.0f, 200.0f, 26.0f },
+        .max_down = 10.0f,
+        .max_up = 4.0f,
+        .max_walkable_up = 0.75f,
+    };
+    WOWSWEEPQUERY sweep = {
+        .start = { 100.0f, 190.0f, 22.0f },
+        .displacement = { 20.0f, 0.0f, 0.0f },
+        .radius = 0.6f,
+        .height = 2.0f,
+    };
+    WOWGROUNDRESULT first_ground, disabled_ground, enabled_ground;
+    WOWSWEEPRESULT disabled_sweep, enabled_sweep;
+    WOWWORLDPROFILE profile;
+    DWORD allocations;
+    LPCSTR enable_command[] = { "world_profile_enable", "1" };
+    LPCSTR reset_command[] = { "world_profile_reset" };
+    LPCSTR summary_command[] = { "world_profile" };
+
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT(!profile.enabled);
+    FOR_LOOP(i, WOW_WORLD_PROFILE_COUNTER_COUNT) ASSERT_EQ_INT((int)profile.counters[i], 0);
+
+    test_wmo_fixture_enabled = true;
+    test_wmo_bsp_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    game->ClientCommand(NULL, 2, enable_command);
+    ASSERT(CM_WowQueryGround(&ground_query, &first_ground));
+    ASSERT(CM_WowSweepWorld(&sweep, &enabled_sweep));
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_GROUND_QUERIES], 1);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_WORLD_SWEEPS], 1);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_TERRAIN_CHUNK_LOOKUPS] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_TERRAIN_LRU_HITS] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_TERRAIN_LRU_MISSES] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_WMO_BROADPHASE_CANDIDATES] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_WMO_INSTANCE_TESTS] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_WMO_GROUP_TESTS] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_TRIANGLE_TESTS] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_MAX_CANDIDATES] > 0);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_MAX_ITERATIONS] > 0);
+
+    game->ClientCommand(NULL, 1, reset_command);
+    CM_WowWorldProfileEnable(false);
+    allocations = test_mem_alloc_calls;
+    ASSERT(CM_WowQueryGround(&ground_query, &disabled_ground));
+    ASSERT(CM_WowSweepWorld(&sweep, &disabled_sweep));
+    ASSERT_EQ_INT((int)test_mem_alloc_calls, (int)allocations);
+    CM_WowWorldProfileSnapshot(&profile);
+    FOR_LOOP(i, WOW_WORLD_PROFILE_COUNTER_COUNT) ASSERT_EQ_INT((int)profile.counters[i], 0);
+
+    CM_WowWorldProfileEnable(true);
+    allocations = test_mem_alloc_calls;
+    ASSERT(CM_WowQueryGround(&ground_query, &enabled_ground));
+    ASSERT(CM_WowSweepWorld(&sweep, &enabled_sweep));
+    ASSERT_EQ_INT((int)test_mem_alloc_calls, (int)allocations);
+    ASSERT_EQ_FLOAT(disabled_ground.height, enabled_ground.height, 0.0001f);
+    ASSERT_EQ_INT((int)disabled_ground.surface, (int)enabled_ground.surface);
+    ASSERT_EQ_FLOAT(disabled_sweep.fraction, enabled_sweep.fraction, 0.0001f);
+
+    CM_WowWorldProfileReset();
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_GROUND_QUERIES, ~0ull);
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_GROUND_QUERIES, 1);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_GROUND_QUERIES] == ~0ull);
+    game->ClientCommand(NULL, 1, reset_command);
+    CM_WowWorldProfileSnapshot(&profile);
+    FOR_LOOP(i, WOW_WORLD_PROFILE_COUNTER_COUNT) ASSERT_EQ_INT((int)profile.counters[i], 0);
+    game->ClientCommand(NULL, 1, summary_command);
+    CM_WowWorldProfileEnable(false);
+    if (game->Shutdown) game->Shutdown();
+}
+
 /* One artificial WMO wall blocks sight, melee, and projectiles through their shared collision pipeline. */
 static void test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards(void) {
     struct game_export *game = init_game();
@@ -916,6 +999,7 @@ static void test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards(void) {
     wowEntityLocal_t *player_local = Wow_EntityLocal(player);
     wowEntityLocal_t *creature_local;
     wowClient_t *client = &wow_clients[0];
+    WOWWORLDPROFILE profile;
     VECTOR3 player_start = { 100.0f, 190.0f, 22.0f };
     VECTOR3 creature_start = { 120.0f, 190.0f, 22.0f };
 
@@ -941,6 +1025,8 @@ static void test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards(void) {
     creature_local->ai_state = WOW_AI_IDLE;
     ASSERT(Wow_PlaceEntityOnGround(creature, &creature_start));
     Wow_AIResetNavigation(creature);
+    CM_WowWorldProfileEnable(true);
+    CM_WowWorldProfileReset();
 
     ASSERT(!Wow_HasLineOfSight(creature, player));
     Wow_AIRunFrame(creature);
@@ -983,7 +1069,13 @@ static void test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards(void) {
     ASSERT_EQ_INT((int)client->quest.count, 0);
     ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_NONE);
     ASSERT_EQ_INT((int)creature_local->num_loot, 0);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_LOS_QUERIES] >= 3);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_BLOCKED_LOS_QUERIES] >= 2);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_PROJECTILE_SWEEPS] > 0);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_PROJECTILE_WALL_HITS], 1);
 
+    CM_WowWorldProfileEnable(false);
     player->client = NULL;
     if (game->Shutdown) game->Shutdown();
 }
@@ -1860,6 +1952,7 @@ static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
 int main(void) {
     RUN_TEST(test_wow_ground_query_reads_artificial_adt);
     RUN_TEST(test_wow_wmo_world_query_handles_floors_ramp_walls_and_door);
+    RUN_TEST(test_wow_world_profile_counts_resets_and_preserves_queries);
     RUN_TEST(test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards);
     RUN_TEST(test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp);
     RUN_TEST(test_wow_load_map_initializes_player_state);

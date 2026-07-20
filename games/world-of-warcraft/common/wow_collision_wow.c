@@ -1,5 +1,6 @@
 #include "common/common.h"
 #include "common/wow_collision_local.h"
+#include "common/wow_world_query.h"
 #include <float.h>
 #include <math.h>
 
@@ -522,10 +523,13 @@ BOOL CM_WowCollisionGroundTile(LPCCMWOWCOLLISIONTILE tile,
     FOR_LOOP(instance_index, tile->instance_count) {
         LPCCMWOWCOLLISIONINSTANCE instance = &tile->instances[instance_index];
 
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WMO_INSTANCE_TESTS, 1);
         if (!CM_WowBoxesIntersect(&instance->bounds, &query_box)) continue;
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WMO_BROADPHASE_CANDIDATES, 1);
         FOR_LOOP(group_index, instance->model->group_count) {
             LPCCMWOWCOLLISIONGROUP group = &instance->model->groups[group_index];
 
+            CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WMO_GROUP_TESTS, 1);
             if (!CM_WowBoxesIntersect(&instance->group_bounds[group_index], &query_box)) continue;
             FOR_LOOP(face, group->face_count) {
                 CMWOWTRIANGLE triangle;
@@ -534,6 +538,7 @@ BOOL CM_WowCollisionGroundTile(LPCCMWOWCOLLISIONTILE tile,
 
                 CMWOWGROUPFACE source = { group, face, &instance->matrix };
 
+                CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TRIANGLE_TESTS, 1);
                 if (!CM_WowGroupTriangle(&source, &triangle)) continue;
                 normal = CM_WowTriangleNormal(&triangle);
                 if (fabsf(normal.z) < CM_WOW_WALKABLE_NORMAL_Z ||
@@ -578,10 +583,13 @@ BOOL CM_WowCollisionSweepTile(LPCCMWOWCOLLISIONTILE tile,
     FOR_LOOP(instance_index, tile->instance_count) {
         LPCCMWOWCOLLISIONINSTANCE instance = &tile->instances[instance_index];
 
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WMO_INSTANCE_TESTS, 1);
         if (!CM_WowBoxesIntersect(&instance->bounds, &sweep_bounds)) continue;
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WMO_BROADPHASE_CANDIDATES, 1);
         FOR_LOOP(group_index, instance->model->group_count) {
             LPCCMWOWCOLLISIONGROUP group = &instance->model->groups[group_index];
 
+            CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WMO_GROUP_TESTS, 1);
             if (!CM_WowBoxesIntersect(&instance->group_bounds[group_index], &sweep_bounds)) continue;
             FOR_LOOP(face, group->face_count) {
                 CMWOWTRIANGLE triangle;
@@ -592,6 +600,7 @@ BOOL CM_WowCollisionSweepTile(LPCCMWOWCOLLISIONTILE tile,
 
                 CMWOWGROUPFACE source = { group, face, &instance->matrix };
 
+                CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TRIANGLE_TESTS, 1);
                 if (!CM_WowGroupTriangle(&source, &triangle)) continue;
                 triangle_normal = CM_WowTriangleNormal(&triangle);
                 if (fabsf(triangle_normal.z) >= CM_WOW_WALKABLE_NORMAL_Z) continue;

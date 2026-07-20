@@ -218,15 +218,18 @@ static void CM_WowLoadAdtHeights(cmWowAdtHeightCache_t *cache, int tile_x, int t
 static cmWowAdtHeightCache_t *CM_WowHeightCache(int tile_x, int tile_y) {
     cmWowAdtHeightCache_t *oldest = &cm_wow_height_cache[0];
 
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TERRAIN_CHUNK_LOOKUPS, 1);
     FOR_LOOP(i, CM_WOW_ADT_CACHE_SIZE) {
         cmWowAdtHeightCache_t *cache = &cm_wow_height_cache[i];
 
         if (cache->loaded && cache->tile_x == tile_x && cache->tile_y == tile_y) {
+            CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TERRAIN_LRU_HITS, 1);
             cache->stamp = ++cm_wow_height_cache_stamp;
             return cache;
         }
         if (!cache->loaded || cache->stamp < oldest->stamp) oldest = cache;
     }
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TERRAIN_LRU_MISSES, 1);
     CM_WowLoadAdtHeights(oldest, tile_x, tile_y);
     return oldest;
 }
@@ -554,7 +557,7 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     cmWowAdtHeightCache_t *cache;
     WOWGROUNDRESULT terrain = { .normal = { 0.0f, 0.0f, 1.0f } };
     WOWGROUNDRESULT wmo = { .normal = { 0.0f, 0.0f, 1.0f } };
-    BOOL has_terrain, has_wmo;
+    BOOL has_terrain, has_wmo, found;
 
     if (result) *result = (WOWGROUNDRESULT){ .normal = { 0.0f, 0.0f, 1.0f } };
     if (!query || !result || !isfinite(query->origin.x) || !isfinite(query->origin.y) ||
@@ -565,12 +568,15 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     tile_x = CM_WowAdtIndexForWorldCoord(query->origin.y);
     tile_y = CM_WowAdtIndexForWorldCoord(query->origin.x);
     if (tile_x < 0 || tile_x >= 64 || tile_y < 0 || tile_y >= 64) return false;
+    CM_WowWorldProfileBeginQuery();
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_GROUND_QUERIES, 1);
     cache = CM_WowHeightCache(tile_x, tile_y);
     has_terrain = CM_WowQueryTerrainGround(query, &terrain);
     has_wmo = CM_WowCollisionGroundTile(&cache->collision, query, &wmo);
-    if (!has_terrain && !has_wmo) return false;
-    *result = has_wmo && (!has_terrain || wmo.height > terrain.height) ? wmo : terrain;
-    return true;
+    found = has_terrain || has_wmo;
+    if (found) *result = has_wmo && (!has_terrain || wmo.height > terrain.height) ? wmo : terrain;
+    CM_WowWorldProfileEndQuery();
+    return found;
 }
 
 /* Sweeps visit only overlapped ADT cache entries and keep earliest WMO contact across tile edges. */
@@ -586,6 +592,8 @@ BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
         !isfinite(query->radius) || !isfinite(query->height) || query->radius <= 0.0f ||
         query->height < query->radius * 2.0f)
         return false;
+    CM_WowWorldProfileBeginQuery();
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_WORLD_SWEEPS, 1);
     end = Vector3_add(&query->start, &query->displacement);
     min_tile_x = MIN(CM_WowAdtIndexForWorldCoord(MIN(query->start.y, end.y) - query->radius),
                      CM_WowAdtIndexForWorldCoord(MAX(query->start.y, end.y) + query->radius));
@@ -601,6 +609,7 @@ BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
         for (int tile_x = min_tile_x; tile_x <= max_tile_x; tile_x++)
             hit |= CM_WowCollisionSweepTile(&CM_WowHeightCache(tile_x, tile_y)->collision, query, result);
     result->end = Vector3_mad(&query->start, result->fraction, &query->displacement);
+    CM_WowWorldProfileEndQuery();
     return hit;
 }
 

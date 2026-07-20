@@ -8,6 +8,7 @@ LIB_DIR := build/lib
 CFLAGS  := -Wall -Wmisleading-indentation -fno-common -I. -Ishared -Ishared/types
 WOW_DIR := games/world-of-warcraft
 WOW_TEST_DIR := $(WOW_DIR)/tests
+WOW_PROFILE_SRC := $(WOW_DIR)/common/wow_world_profile.c
 WOW_GAMEPLAY_TEST_SRCS := $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/g_inventory.c $(WOW_DIR)/game/g_physics.c \
 	$(WOW_DIR)/game/g_quest.c $(WOW_DIR)/game/g_progress.c
 WOW_DATA_DIR := data/world-of-warcraft
@@ -307,7 +308,7 @@ clean:
 $(eval $(call test_schema,test-wow-appearance,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_appearance$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_appearance.c common/msg.c common/net.c $(call CSRC,shared),-lm,))
 $(eval $(call test_schema,test-wow-physics,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_physics$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_physics.c $(WOW_DIR)/game/g_physics.c $(call CSRC,shared),-lm,))
 $(eval $(call test_schema,test-wow-wmo,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_wmo$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_wmo.c $(call CSRC,shared),-lm,))
-$(eval $(call test_schema,test-wow-combat,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_combat$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_combat.c $(WOW_GAMEPLAY_TEST_SRCS) $(call CSRC,shared),-lm,))
+$(eval $(call test_schema,test-wow-combat,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_combat$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_combat.c $(WOW_PROFILE_SRC) $(WOW_GAMEPLAY_TEST_SRCS) $(call CSRC,shared),-lm,))
 $(eval $(call test_schema,test-wow-abilities,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_abilities$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_abilities.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_GAMEPLAY_TEST_SRCS) $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
 $(eval $(call test_schema,test-wow-game,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_game$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_game.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_GAMEPLAY_TEST_SRCS) $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
 $(eval $(call test_schema,test-wow-hud,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_hud$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_hud.c $(WOW_DIR)/game/g_ui.c,-lm,))

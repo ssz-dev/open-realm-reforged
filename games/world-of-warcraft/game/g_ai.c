@@ -125,6 +125,7 @@ BOOL Wow_HasLineOfSight(LPCEDICT source, LPCEDICT target) {
     FLOAT source_height, target_height;
     WOWSWEEPQUERY query;
     WOWSWEEPRESULT trace;
+    BOOL blocked;
 
     if (!source || !target || !source_local || !target_local || !source->inuse || !target->inuse) return false;
     source_height = source_local->kind == WOW_ENTITY_PLAYER ? 1.4f : MAX(0.75f, source->s.radius * 1.25f);
@@ -139,7 +140,10 @@ BOOL Wow_HasLineOfSight(LPCEDICT source, LPCEDICT target) {
         .radius = BZ_WOW_AI_LOS_RADIUS,
         .height = BZ_WOW_AI_LOS_RADIUS * 2.0f,
     };
-    return !CM_WowSweepWorld(&query, &trace);
+    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_LOS_QUERIES, 1);
+    blocked = CM_WowSweepWorld(&query, &trace);
+    if (blocked) CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_BLOCKED_LOS_QUERIES, 1);
+    return !blocked;
 }
 
 /* Spawn and successful return-to-idle are the only points that redefine the non-persistent safe checkpoint. */
@@ -632,6 +636,7 @@ static BOOL Wow_AIChooseSteer(LPEDICT ent, LPCVECTOR2 desired, FLOAT probe_dista
         if (length <= 0.001f) continue;
         candidate[i] = Vector2_scale(&candidate[i], 1.0f / length);
         displacement = Vector2_scale(&candidate[i], probe_distance);
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_AI_STEERING_PROBES, 1);
         clearance = Wow_TraceEntityMove(&(WOWENTITYSWEEP){ ent, ent->s.origin, displacement }, &trace)
             ? trace.fraction : 1.0f;
         if (clearance <= 0.05f) continue;
@@ -703,6 +708,7 @@ static wowAiMoveResult_t Wow_AIMoveToward(LPEDICT ent, LPCWOWAIMOVEINPUT input) 
     if (local->obstacle.stuck_time < BZ_WOW_AI_STUCK_TIME) return WOW_AI_MOVE_MOVING;
     if (!recovering && !local->obstacle.recoveries &&
         Wow_Distance2(&local->obstacle.last_valid, &ent->s.origin2) > 0.2f) {
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_STUCK_RECOVERIES, 1);
         local->obstacle.state = WOW_AI_PATH_RECOVER;
         local->obstacle.recoveries = 1;
         local->obstacle.stuck_time = local->obstacle.steer_time = 0;
@@ -717,9 +723,12 @@ static BOOL Wow_AIAcquirePlayer(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
     LPEDICT player = &wow_edicts[0];
 
-    if (!ent || !local || !local->hostile || !Wow_EntityCanBeTargeted(player) ||
-        Wow_Distance2(&player->s.origin2, &ent->s.origin2) > BZ_WOW_CREATURE_AGGRO_RANGE ||
-        !Wow_HasLineOfSight(ent, player)) return false;
+    if (!ent || !local || !local->hostile || !Wow_EntityCanBeTargeted(player)) return false;
+    if (Wow_Distance2(&player->s.origin2, &ent->s.origin2) > BZ_WOW_CREATURE_AGGRO_RANGE) {
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_DISTANCE_REJECTS, 1);
+        return false;
+    }
+    if (!Wow_HasLineOfSight(ent, player)) return false;
     local->enemy = player;
     local->ai_state = WOW_AI_AGGRO;
     Wow_AIResetNavigation(ent);
@@ -861,6 +870,7 @@ void Wow_AIRunFrame(LPEDICT ent) {
             target_distance <= WOW_MELEE_RANGE ? 0.0f : WOW_MELEE_RANGE
         });
         if (move_result == WOW_AI_MOVE_FAILED) {
+            CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_EVADE_FALLBACKS, 1);
             Wow_AIEnterEvade(ent);
             return;
         }

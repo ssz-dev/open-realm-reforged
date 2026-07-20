@@ -542,7 +542,9 @@ void Wow_RunProjectile(LPEDICT ent) {
             .height = BZ_WOW_PROJECTILE_COLLISION_RADIUS * 2.0f,
         };
         /* The final homing segment must hit WMO geometry before damage can award any combat progression. */
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_PROJECTILE_SWEEPS, 1);
         if (CM_WowSweepWorld(&query, &trace)) {
+            CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_PROJECTILE_WALL_HITS, 1);
             ent->inuse = false;
             return;
         }
@@ -1221,6 +1223,7 @@ static void Wow_Init(void) {
     memset(wow_entity_locals, 0, sizeof(wow_entity_locals));
     memset(wow_clients, 0, sizeof(wow_clients));
     wow_move.gm = false;
+    CM_WowWorldProfileInit(atoi(gi.CvarString("wow_world_profile", "0")) != 0);
     Wow_InitProgressPersistence();
 
     globals.edicts = wow_edicts;
@@ -1233,6 +1236,7 @@ static void Wow_Init(void) {
 static void Wow_Shutdown(void) {
     if (wow_edicts[0].inuse && wow_edicts[0].client)
         (void)Wow_AutoSavePlayerProgress(&wow_edicts[0]);
+    if (CM_WowWorldProfileEnabled()) CM_WowWorldProfilePrint();
     G_FreeModels();
     globals.edicts = NULL;
     globals.num_edicts = 0;
@@ -1484,7 +1488,14 @@ static LPCSTR Wow_GetThemeValue(LPCSTR filename) {
 }
 
 static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
-    if (argc >= 5 && (!strcasecmp(argv[0], "move") || !strcasecmp(argv[0], "wowmove"))) {
+    if (argc >= 1 && !strcasecmp(argv[0], "world_profile_enable")) {
+        CM_WowWorldProfileEnable(argc >= 2 && atoi(argv[1]) != 0);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "world_profile")) {
+        CM_WowWorldProfilePrint();
+    } else if (argc >= 1 && !strcasecmp(argv[0], "world_profile_reset")) {
+        CM_WowWorldProfileReset();
+        fprintf(stderr, "OpenWoW world profile: reset\n");
+    } else if (argc >= 5 && (!strcasecmp(argv[0], "move") || !strcasecmp(argv[0], "wowmove"))) {
         wow_move.flags = (DWORD)strtoul(argv[1], NULL, 10);
         wow_move.yaw = (FLOAT)atof(argv[2]);
         wow_move.pitch = Wow_Clamp((FLOAT)atof(argv[3]), WOW_CAMERA_MIN_PITCH, WOW_CAMERA_MAX_PITCH);
