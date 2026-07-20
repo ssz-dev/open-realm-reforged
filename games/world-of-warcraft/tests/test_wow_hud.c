@@ -17,7 +17,7 @@ typedef struct {
 } capturedFrame_t;
 
 struct game_import gi;
-static capturedFrame_t captured[128];
+static capturedFrame_t captured[192];
 static char images[64][MAX_PATHLEN];
 static DWORD num_captured;
 static DWORD num_images;
@@ -106,11 +106,14 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     capturedFrame_t const *strike;
     capturedFrame_t const *heavy;
     capturedFrame_t const *throw_action;
+    capturedFrame_t const *potion;
+    capturedFrame_t const *loot;
     BOOL found_zone = false;
     BOOL found_level = false, found_health = false, found_power = false, found_xp = false;
     BOOL found_health_text = false, found_power_text = false, found_xp_text = false;
     BOOL found_hotkey1 = false, found_hotkey2 = false, found_hotkey3 = false;
     BOOL found_rage_cost = false, found_cooldown = false, found_feedback = false, found_disabled = false;
+    BOOL found_inventory = false, found_equipment = false, found_loot = false, found_count = false;
 
     reset_state();
     memset(&wc, 0, sizeof(wc));
@@ -143,6 +146,13 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     wc.combat_message.type = WOW_COMBAT_MESSAGE_NO_RAGE;
     wc.combat_message.time = 1000;
     snprintf(wc.combat_message.text, sizeof(wc.combat_message.text), "%s", "Not enough Rage");
+    snprintf(wc.inventory[0].icon, sizeof(wc.inventory[0].icon), "%s",
+             "Interface\\Icons\\INV_Potion_51.blp");
+    snprintf(wc.inventory[0].name, sizeof(wc.inventory[0].name), "%s", "Minor Healing Potion");
+    wc.inventory[0].count = 2;
+    snprintf(wc.equipment_text, sizeof(wc.equipment_text), "%s",
+             "Weapon: Training Sword | Armor: none");
+    wc.loot_target = 7;
     snprintf(wc.zone_name, sizeof(wc.zone_name), "%s", "The Sepulcher");
     UI_WriteWowHud(&ent);
 
@@ -157,12 +167,19 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     strike = find_frame(FT_TEXTURE, "Interface\\Icons\\Ability_Warrior_Cleave.blp", "wow_action 0");
     heavy = find_frame(FT_TEXTURE, "Interface\\Icons\\Ability_Warrior_Charge.blp", "wow_action 1");
     throw_action = find_frame(FT_TEXTURE, "Interface\\Icons\\Spell_Fire_FireBolt02.blp", "wow_action 2");
+    potion = find_frame(FT_TEXTURE, "Interface\\Icons\\INV_Potion_51.blp", "use_item 0");
+    loot = find_frame(FT_TEXTURE, "Interface\\Icons\\INV_Misc_Bag_08.blp", "loot 7");
     ASSERT_NOT_NULL(strike);
     ASSERT_NOT_NULL(heavy);
     ASSERT_NOT_NULL(throw_action);
+    ASSERT_NOT_NULL(potion);
+    ASSERT_NOT_NULL(loot);
     ASSERT_STR_EQ(strike->tooltip, "Strike");
     ASSERT_STR_EQ(heavy->tooltip, "Heavy Strike");
     ASSERT_STR_EQ(throw_action->tooltip, "Throw");
+    ASSERT_STR_EQ(potion->tooltip, "Minor Healing Potion");
+    ASSERT_STR_EQ(loot->tooltip, "Collect corpse loot");
+    ASSERT(frame_y(loot) + loot->frame.size.height <= frame_y(potion));
     ASSERT_EQ_FLOAT(frame_x(minimap), 879.0f / 1024.0f, 0.0001f);
     ASSERT_EQ_FLOAT(frame_y(minimap), 30.0f / 768.0f, 0.0001f);
     ASSERT_EQ_FLOAT(minimap->frame.size.width, 128.0f / 1024.0f, 0.0001f);
@@ -181,6 +198,10 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
         if (!strcmp(captured[i].text, "20R")) found_rage_cost = true;
         if (!strcmp(captured[i].text, "2s")) found_cooldown = true;
         if (!strcmp(captured[i].text, "Not enough Rage")) found_feedback = true;
+        if (!strcmp(captured[i].text, "INVENTORY")) found_inventory = true;
+        if (!strcmp(captured[i].text, "Weapon: Training Sword | Armor: none")) found_equipment = true;
+        if (!strcmp(captured[i].text, "Loot corpse")) found_loot = true;
+        if (!strcmp(captured[i].text, "2") && frame_x(&captured[i]) > 630.0f / 1024.0f) found_count = true;
         if (captured[i].frame.flags.type == FT_SIMPLESTATUSBAR && captured[i].frame.color.a == 135 &&
             captured[i].frame.color.r == 0 && captured[i].frame.color.g == 0 &&
             captured[i].frame.color.b == 0) found_disabled = true;
@@ -204,6 +225,7 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     ASSERT(found_xp && found_xp_text);
     ASSERT(found_hotkey1 && found_hotkey2 && found_hotkey3);
     ASSERT(found_rage_cost && found_cooldown && found_feedback && found_disabled);
+    ASSERT(found_inventory && found_equipment && found_loot && found_count);
 }
 
 static void test_wow_quest_log_writes_classic_empty_state_and_close_action(void) {

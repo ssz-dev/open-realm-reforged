@@ -211,6 +211,7 @@ void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage) {
         return;
     }
 
+    damage = Wow_AdjustIncomingDamage(target, damage);
     Wow_GainCombatPower(source, damage * 5);
     Wow_GainCombatPower(target, damage * 3);
     Wow_SetCombatMessage(source, WOW_COMBAT_MESSAGE_DAMAGE_DEALT, MIN(damage, target_local->health));
@@ -433,6 +434,7 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker) {
     Wow_ClearCombatReferences(ent);
     Wow_SyncEntityVitals(ent);
     Wow_AwardKillXp(attacker, ent);
+    if (local->kind == WOW_ENTITY_CREATURE) Wow_GenerateLoot(ent);
     if (Wow_SetEntityMoveFirstAnimation(ent, &wow_move_death, death_animations) && local->animation) {
         local->death_time = MAX(1, local->animation->interval[1] - local->animation->interval[0]);
     } else {
@@ -608,6 +610,7 @@ static void Wow_AIRespawn(LPEDICT ent) {
     local->enemy = NULL;
     local->death_time = local->respawn_time = local->regen_time = 0;
     Wow_ResetAttack(local);
+    Wow_ClearLoot(ent);
     ent->s.origin = (VECTOR3){ local->home.x, local->home.y, Wow_TerrainHeight(local->home.x, local->home.y) };
     ent->s.origin2 = local->home;
     ent->svflags = (ent->svflags | SVF_MONSTER) & ~SVF_DEADMONSTER;

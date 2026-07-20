@@ -42,6 +42,9 @@
 #define BZ_WOW_THROW_COOLDOWN 2000
 #define BZ_WOW_THROW_RANGE 30.0f
 #define BZ_WOW_COMBAT_MESSAGE_TIME 1500
+#define BZ_WOW_MAX_LOOT_ITEMS 3
+#define BZ_WOW_LOOT_RANGE 6.0f
+#define BZ_WOW_UI_DIRTY 1
 #define WOW_MELEE_RANGE 5.0f
 #define WOW_CAMERA_MIN_PITCH 300.0f
 #define WOW_CAMERA_MAX_PITCH 350.0f
@@ -91,7 +94,55 @@ typedef enum {
     WOW_COMBAT_MESSAGE_OUT_OF_RANGE,
     WOW_COMBAT_MESSAGE_NO_TARGET,
     WOW_COMBAT_MESSAGE_NOT_READY,
+    WOW_COMBAT_MESSAGE_LOOT,
+    WOW_COMBAT_MESSAGE_INVENTORY_FULL,
+    WOW_COMBAT_MESSAGE_HEAL,
+    WOW_COMBAT_MESSAGE_EQUIP,
 } wowCombatMessageType_t;
+
+typedef enum {
+    WOW_ITEM_NONE,
+    WOW_ITEM_MINOR_HEALING_POTION,
+    WOW_ITEM_TRAINING_SWORD,
+    WOW_ITEM_PADDED_ARMOR,
+    WOW_ITEM_COUNT,
+} wowItemId_t;
+
+typedef enum {
+    WOW_ITEM_CONSUMABLE,
+    WOW_ITEM_WEAPON,
+    WOW_ITEM_ARMOR,
+} wowItemType_t;
+
+typedef enum {
+    WOW_EQUIPMENT_WEAPON,
+    WOW_EQUIPMENT_ARMOR,
+    WOW_EQUIPMENT_COUNT,
+} wowEquipmentSlot_t;
+
+typedef enum {
+    WOW_LOOT_NONE,
+    WOW_LOOT_AVAILABLE,
+    WOW_LOOT_PICKED,
+} wowLootState_t;
+
+typedef struct {
+    wowItemId_t item;
+    DWORD count;
+} WOWITEMSTACK;
+typedef WOWITEMSTACK *LPWOWITEMSTACK;
+typedef WOWITEMSTACK const *LPCWOWITEMSTACK;
+
+typedef struct {
+    wowItemId_t id;
+    wowItemType_t type;
+    LPCSTR name;
+    LPCSTR icon;
+    DWORD max_stack;
+    DWORD value;
+} WOWITEMDEF;
+typedef WOWITEMDEF *LPWOWITEMDEF;
+typedef WOWITEMDEF const *LPCWOWITEMDEF;
 
 typedef struct wowMove_s {
     LPCSTR animation;
@@ -132,6 +183,9 @@ typedef struct {
     BOOL dead;
     BOOL hostile;
     LPEDICT enemy;
+    wowLootState_t loot_state;
+    DWORD num_loot;
+    WOWITEMSTACK loot[BZ_WOW_MAX_LOOT_ITEMS];
     /* Projectile fields (valid when kind == WOW_ENTITY_PROJECTILE) */
     DWORD projectile_target;
     DWORD projectile_caster;
@@ -162,9 +216,13 @@ typedef struct {
     struct client_s client;
     UINAME name;
     char zone_name[128];
+    WOWITEMSTACK bag[WOW_UI_INVENTORY_SLOTS];
+    wowItemId_t equipment[WOW_EQUIPMENT_COUNT];
     wowHudIcon_t inventory[WOW_UI_INVENTORY_SLOTS];
     wowHudIcon_t actions[WOW_UI_ACTION_SLOTS];
     WOWCOMBATMESSAGE combat_message;
+    char equipment_text[128];
+    DWORD loot_target;
     DWORD ui_flags;
     BOOL quest_log_open;
 } wowClient_t;
@@ -220,6 +278,15 @@ void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD val
 void Wow_SyncEntityVitals(LPEDICT ent);
 DWORD Wow_XpForNextLevel(DWORD level);
 void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim);
+LPCWOWITEMDEF Wow_ItemDef(wowItemId_t item);
+BOOL Wow_GiveItem(LPEDICT player, wowItemId_t item, DWORD count);
+BOOL Wow_LootCreature(LPEDICT player, LPEDICT creature);
+BOOL Wow_UseInventorySlot(LPEDICT player, DWORD slot);
+void Wow_GenerateLoot(LPEDICT creature);
+void Wow_ClearLoot(LPEDICT creature);
+DWORD Wow_PlayerWeaponBonus(LPEDICT player);
+DWORD Wow_AdjustIncomingDamage(LPEDICT target, DWORD damage);
+BOOL Wow_UpdateInventoryUiState(LPEDICT player);
 BOOL Wow_SetStandMove(LPEDICT ent);
 BOOL Wow_SetRunMove(LPEDICT ent);
 BOOL Wow_SetWalkMove(LPEDICT ent);

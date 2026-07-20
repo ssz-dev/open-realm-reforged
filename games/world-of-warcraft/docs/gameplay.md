@@ -66,3 +66,32 @@ floating-text queue.
 
 Ability tests use artificial entities, animations, and a one-byte projectile-model fixture in
 `tests/test_wow_abilities.c`.
+
+## Loot, Inventory, and Equipment
+
+Creature loot continues the same server-owned death path:
+
+```text
+Wow_AIDie
+  -> Wow_GenerateLoot
+  -> corpse-owned fixed loot list
+  -> loot <entity>
+  -> atomic Wow_LootCreature preflight
+  -> wowClient_t.bag
+  -> use_item <slot>
+  -> health or equipment
+  -> UI_WriteWowHud
+```
+
+The starter table contains a stackable Minor Healing Potion, a Training Sword, and Padded Armor. The six-slot bag
+stacks items up to their item-table limit. Loot pickup first applies the complete corpse list to a copied bag; if any
+item does not fit, neither bag nor corpse changes. A successful pickup marks that corpse as picked, and respawn clears
+all remaining corpse loot.
+
+Potions heal the authoritative player health up to its maximum and consume one stack entry. Equipment stores one item
+ID for each weapon and armor slot. The weapon bonus enters the existing ability damage point, while armor reduction
+enters `Wow_DealDamage`, the central incoming-damage path. The HUD exposes only derived icons, counts, equipment text,
+and `loot`/`use_item` commands; it never owns item stats.
+
+Inventory tests use only fixed artificial entities and item IDs in `tests/test_wow_abilities.c`,
+`tests/test_wow_combat.c`, `tests/test_wow_game.c`, and `tests/test_wow_hud.c`.

@@ -29,7 +29,7 @@ static animation_t g_death_anim = {
 };
 
 static DWORD g_pain_calls = 0;
-static struct client_s g_player_client;
+static wowClient_t g_player_client;
 
 void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD value) {
     (void)player;
@@ -187,7 +187,7 @@ static void test_prepare_player_creature(LPEDICT *player_out, LPEDICT *creature_
     test_prepare_pair(&player, &creature);
     player_local = Wow_EntityLocal(player);
     creature_local = Wow_EntityLocal(creature);
-    player->client = &g_player_client;
+    player->client = &g_player_client.client;
     player->pain = Wow_AIPain;
     player_local->kind = WOW_ENTITY_PLAYER;
     player_local->health = player_local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
@@ -554,8 +554,11 @@ static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
     ASSERT_EQ_INT((int)creature->selected, 0);
     ASSERT(!projectile->inuse);
     ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_AVAILABLE);
+    ASSERT_EQ_INT((int)creature_local->num_loot, BZ_WOW_MAX_LOOT_ITEMS);
     Wow_AIDie(creature, player);
     ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+    ASSERT_EQ_INT((int)creature_local->num_loot, BZ_WOW_MAX_LOOT_ITEMS);
     player->s.origin2.x = player->s.origin.x = 100.0f;
     FOR_LOOP(i, 70) Wow_AIRunFrame(creature);
     ASSERT(!creature_local->dead);
@@ -568,6 +571,8 @@ static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
     ASSERT_EQ_FLOAT(creature->s.origin.y, creature_local->home.y, 0.001f);
     ASSERT_EQ_FLOAT(creature->s.origin.z, 7.0f, 0.001f);
     ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 255);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_NONE);
+    ASSERT_EQ_INT((int)creature_local->num_loot, 0);
 }
 
 int main(void) {

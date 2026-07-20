@@ -34,6 +34,15 @@ typedef struct {
 typedef WOWACTIONDRAW *LPWOWACTIONDRAW;
 typedef WOWACTIONDRAW const *LPCWOWACTIONDRAW;
 
+typedef struct {
+    FLOAT x, y;
+    DWORD image_index;
+    DWORD slot;
+    wowHudIcon_t const *icon;
+} WOWITEMDRAW;
+typedef WOWITEMDRAW *LPWOWITEMDRAW;
+typedef WOWITEMDRAW const *LPCWOWITEMDRAW;
+
 static DWORD ui_next_frame_number;
 
 static void UI_SetFramePoint(uiFramePoint_t *point, uiFramePointPos_t target, DWORD relative,
@@ -240,6 +249,67 @@ static void UI_WriteActionButtonSlot(LPCWOWACTIONDRAW draw) {
     }
 }
 
+/* Inventory clicks send one existing server command; counts and tooltips remain derived HUD state. */
+static void UI_WriteInventorySlot(LPCWOWITEMDRAW draw) {
+    char command[32], count_buf[16];
+
+    UI_WriteImage("Interface\\Buttons\\UI-Quickslot2.blp",
+                  draw->x + PX(-14), draw->y + PY(-13), PW(64), PH(64), COLOR32_WHITE);
+    if (!draw->image_index || !draw->icon) return;
+    {
+        uiFrame_t frame;
+
+        snprintf(command, sizeof(command), "use_item %u", (unsigned)draw->slot);
+        memset(&frame, 0, sizeof(frame));
+        frame.flags.type = FT_TEXTURE;
+        frame.color = COLOR32_WHITE;
+        frame.tex.index = draw->image_index;
+        frame.tex.coord[1] = frame.tex.coord[3] = 0xff;
+        frame.tooltip = draw->icon->name;
+        frame.onclick = command;
+        UI_SetFrameRect(&frame, draw->x + PX(2), draw->y + PY(2), PW(32), PH(32));
+        UI_WriteProxyFrame(&frame, NULL, 0);
+    }
+    if (draw->icon->count > 1) {
+        snprintf(count_buf, sizeof(count_buf), "%u", (unsigned)draw->icon->count);
+        UI_WriteTextFrame(draw->x + PX(2), draw->y + PY(23), PW(32), PH(10),
+                          count_buf, COLOR32_WHITE, FONT_JUSTIFYRIGHT);
+    }
+}
+
+static void UI_WriteInventory(wowClient_t const *client) {
+    UI_WriteTextFrame(PX(632), PY(638), PW(250), PH(14), "INVENTORY",
+                      MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
+    UI_WriteTextFrame(PX(632), PY(652), PW(330), PH(14), client->equipment_text,
+                      MAKE(COLOR32, 225, 210, 175, 255), FONT_JUSTIFYLEFT);
+    FOR_LOOP(i, WOW_UI_INVENTORY_SLOTS) {
+        DWORD image = client->inventory[i].icon[0] ? gi.ImageIndex(client->inventory[i].icon) : 0;
+        WOWITEMDRAW draw = {
+            PX(632.0f + (FLOAT)i * 42.0f), PY(674), image, i,
+            client->inventory[i].icon[0] ? &client->inventory[i] : NULL
+        };
+
+        UI_WriteInventorySlot(&draw);
+    }
+}
+
+/* A nearby corpse exposes pickup through the same server-command hit-test path as other native HUD controls. */
+static void UI_WriteLootPrompt(DWORD target) {
+    char command[32];
+    wowHudButton_t button = {
+        .path = "Interface\\Icons\\INV_Misc_Bag_08.blp",
+        .tooltip = "Collect corpse loot",
+        .rect = { PX(542), PY(610), PW(40), PH(40) },
+    };
+
+    if (!target) return;
+    snprintf(command, sizeof(command), "loot %u", (unsigned)target);
+    button.onclick = command;
+    UI_WriteImageButton(&button);
+    UI_WriteTextFrame(PX(584), PY(620), PW(120), PH(18), "Loot corpse",
+                      MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
+}
+
 /* Targeting frame: the WoW character frame backdrop + health/mana bars + name/level text */
 static void UI_WriteTargetingFrame(LPEDICT ent) {
     LPPLAYER ps = &ent->client->ps;
@@ -382,6 +452,9 @@ void UI_WriteWowHud(LPEDICT ent) {
 
         UI_WriteActionButtonSlot(&draw);
     }
+
+    UI_WriteInventory(wc);
+    UI_WriteLootPrompt(wc->loot_target);
 
     if (wc->combat_message.time && wc->combat_message.text[0]) {
         UI_WriteColorRect(PX(362), PY(86), PW(300), PH(24), MAKE(COLOR32, 5, 8, 12, 190));

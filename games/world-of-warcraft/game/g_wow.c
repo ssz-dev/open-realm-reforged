@@ -51,19 +51,9 @@ static struct {
     .distance = 8.5f,
 };
 
-static wowHudIcon_t const wow_start_inventory[WOW_UI_INVENTORY_SLOTS] = {
-    { "Interface\\Icons\\INV_Misc_Bag_08.blp", "Backpack", 1, 0, 0, 0 },
-    { "Interface\\Icons\\INV_Weapon_ShortBlade_05.blp", "Short Blade", 1, 0, 0, 0 },
-    { "Interface\\Icons\\INV_Misc_Food_24.blp", "Food", 5, 0, 0, 0 },
-    { "Interface\\Icons\\Spell_Nature_HealingTouch.blp", "Healing Touch", 1, 0, 0, 0 },
-    { "Interface\\Icons\\Ability_Warrior_BattleShout.blp", "Battle Shout", 1, 0, 0, 0 },
-    { "Interface\\Icons\\INV_Misc_Coin_01.blp", "Coin", 12, 0, 0, 0 },
-};
-
 static wowHudIcon_t const wow_start_actions[WOW_UI_ACTION_SLOTS] = { 0 };
 
 #define WOW_MISSING_ANIMATION_LOG_SLOTS 128
-#define BZ_WOW_UI_DIRTY 1
 
 typedef struct {
     DWORD model;
@@ -708,6 +698,18 @@ void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD val
         case WOW_COMBAT_MESSAGE_NOT_READY:
             snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Ability not ready");
             break;
+        case WOW_COMBAT_MESSAGE_LOOT:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Loot collected");
+            break;
+        case WOW_COMBAT_MESSAGE_INVENTORY_FULL:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Inventory full");
+            break;
+        case WOW_COMBAT_MESSAGE_HEAL:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "+%u Health", (unsigned)value);
+            break;
+        case WOW_COMBAT_MESSAGE_EQUIP:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Item equipped");
+            break;
         default:
             client->combat_message.time = 0;
             client->combat_message.text[0] = '\0';
@@ -746,7 +748,7 @@ BOOL Wow_UseAbility(LPEDICT ent, wowAbility_t ability) {
         if (!Wow_FireFirebolt(ent, target)) goto failed;
     } else {
         if (!ent->attack) goto failed;
-        local->attack_damage = wow_ability_defs[ability].damage;
+        local->attack_damage = wow_ability_defs[ability].damage + Wow_PlayerWeaponBonus(ent);
         ent->attack(ent);
         if (!local->attack_damage_time && !local->attack_backswing_time) goto failed;
     }
@@ -836,6 +838,7 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
     hud_changed = (wc->ui_flags & BZ_WOW_UI_DIRTY) || memcmp(ps->stats, stats, sizeof(stats)) != 0;
     memcpy(ps->stats, stats, sizeof(stats));
     if (Wow_UpdateActionHud(ent)) hud_changed = true;
+    if (Wow_UpdateInventoryUiState(ent)) hud_changed = true;
     zone = CM_WowAreaNameAtPoint(ent->s.origin.x, ent->s.origin.y);
     mapinfo = CM_GetMapInfo();
     if (!zone || !*zone)
@@ -1109,7 +1112,13 @@ static void Wow_InitPlayer(LPEDICT ent) {
     ps->number = 0;
     ps->start_location = wow_spawn_location;
     snprintf(wow_clients[0].name, sizeof(wow_clients[0].name), "%s", "Thrall");
-    memcpy(wow_clients[0].inventory, wow_start_inventory, sizeof(wow_start_inventory));
+    memset(wow_clients[0].bag, 0, sizeof(wow_clients[0].bag));
+    memset(wow_clients[0].equipment, 0, sizeof(wow_clients[0].equipment));
+    memset(wow_clients[0].inventory, 0, sizeof(wow_clients[0].inventory));
+    memset(&wow_clients[0].combat_message, 0, sizeof(wow_clients[0].combat_message));
+    wow_clients[0].equipment_text[0] = '\0';
+    wow_clients[0].loot_target = 0;
+    wow_clients[0].ui_flags = 0;
     memcpy(wow_clients[0].actions, wow_start_actions, sizeof(wow_start_actions));
     FOR_LOOP(i, WOW_ABILITY_COUNT) {
         wowHudIcon_t *icon = &wow_clients[0].actions[i];
@@ -1515,6 +1524,10 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
 
         if (slot < WOW_ABILITY_COUNT) (void)Wow_UseAbility(ent, (wowAbility_t)slot);
         else fprintf(stderr, "WoW: unhandled action slot %u\n", (unsigned)slot);
+    } else if (argc >= 2 && !strcasecmp(argv[0], "loot")) {
+        (void)Wow_LootCreature(ent, Wow_EdictByNumber((DWORD)strtoul(argv[1], NULL, 10)));
+    } else if (argc >= 2 && !strcasecmp(argv[0], "use_item")) {
+        (void)Wow_UseInventorySlot(ent, (DWORD)strtoul(argv[1], NULL, 10));
     }
 }
 

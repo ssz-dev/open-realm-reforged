@@ -498,11 +498,11 @@ static void assert_player_ui_payload(void) {
     }
     num_inventory = test_last_unicast_buf[cursor++];
     ASSERT_EQ_INT(num_inventory, WOW_UI_INVENTORY_SLOTS);
-    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "Interface\\Icons\\INV_Misc_Bag_08.blp");
+    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "");
     cursor += (DWORD)strlen((LPCSTR)test_last_unicast_buf + cursor) + 1;
-    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "Backpack");
+    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "");
     cursor += (DWORD)strlen((LPCSTR)test_last_unicast_buf + cursor) + 1;
-    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "1");
+    ASSERT_STR_EQ((LPCSTR)test_last_unicast_buf + cursor, "0");
     cursor += (DWORD)strlen((LPCSTR)test_last_unicast_buf + cursor) + 1;
     ASSERT_EQ_INT(test_last_unicast_buf[cursor++], 0);
 }
@@ -718,6 +718,48 @@ static void test_wow_action_commands_bind_three_server_abilities(void) {
     if (game->Shutdown) game->Shutdown();
 }
 
+/* Native HUD commands loot one nearby corpse and equip the resulting server-owned items. */
+static void test_wow_loot_inventory_and_equipment_command_loop(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, creature;
+    wowEntityLocal_t *creature_local;
+    wowClient_t *client;
+    LPCSTR loot_argv[] = { "loot", "1" };
+    LPCSTR sword_argv[] = { "use_item", "1" };
+    LPCSTR armor_argv[] = { "use_item", "2" };
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    creature = first_creature();
+    ASSERT_NOT_NULL(creature);
+    creature_local = Wow_EntityLocal(creature);
+    client = (wowClient_t *)player->client;
+    creature->s.origin = (VECTOR3){ player->s.origin.x + 4.0f, player->s.origin.y, player->s.origin.z };
+    creature->s.origin2 = (VECTOR2){ creature->s.origin.x, creature->s.origin.y };
+    game->ClientBegin(player);
+    Wow_AIDie(creature, player);
+    game->RunFrame();
+    ASSERT_EQ_INT((int)client->loot_target, (int)creature->s.number);
+
+    game->ClientCommand(player, 2, loot_argv);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_PICKED);
+    ASSERT_EQ_INT((int)client->bag[0].item, WOW_ITEM_MINOR_HEALING_POTION);
+    ASSERT_EQ_INT((int)client->bag[1].item, WOW_ITEM_TRAINING_SWORD);
+    ASSERT_EQ_INT((int)client->bag[2].item, WOW_ITEM_PADDED_ARMOR);
+    game->ClientCommand(player, 2, sword_argv);
+    game->ClientCommand(player, 2, armor_argv);
+    game->RunFrame();
+    ASSERT_EQ_INT((int)client->equipment[WOW_EQUIPMENT_WEAPON], WOW_ITEM_TRAINING_SWORD);
+    ASSERT_EQ_INT((int)client->equipment[WOW_EQUIPMENT_ARMOR], WOW_ITEM_PADDED_ARMOR);
+    ASSERT_STR_EQ(client->inventory[0].name, "Minor Healing Potion");
+    ASSERT_STR_EQ(client->inventory[1].name, "Training Sword");
+    ASSERT_STR_EQ(client->inventory[2].name, "Padded Armor");
+    ASSERT_STR_EQ(client->equipment_text, "Weapon: Training Sword | Armor: Padded Armor");
+    ASSERT_EQ_INT((int)client->loot_target, 0);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
 /* GM exploration speeds manual travel but never bypasses mode, input, or world-bound validation. */
 static void test_wow_gm_mode_accelerates_and_guards_teleport(void) {
     struct game_export *game = init_game();
@@ -885,6 +927,7 @@ int main(void) {
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
     RUN_TEST(test_wow_action_commands_bind_three_server_abilities);
+    RUN_TEST(test_wow_loot_inventory_and_equipment_command_loop);
     RUN_TEST(test_wow_gm_mode_accelerates_and_guards_teleport);
     RUN_TEST(test_wow_quest_log_commands_toggle_server_ui);
     RUN_TEST(test_wow_zone_name_tracks_player_area);

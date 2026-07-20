@@ -288,6 +288,20 @@ static DWORD count_projectiles(void) {
     return count;
 }
 
+static DWORD inventory_count(wowClient_t const *client, wowItemId_t item) {
+    DWORD count = 0;
+
+    FOR_LOOP(i, WOW_UI_INVENTORY_SLOTS)
+        if (client->bag[i].item == item) count += client->bag[i].count;
+    return count;
+}
+
+static DWORD inventory_slot(wowClient_t const *client, wowItemId_t item) {
+    FOR_LOOP(i, WOW_UI_INVENTORY_SLOTS)
+        if (client->bag[i].item == item && client->bag[i].count) return i;
+    return WOW_UI_INVENTORY_SLOTS;
+}
+
 /* ---- Ability tests ---- */
 
 static void test_firebolt_spawns_projectile(void) {
@@ -714,6 +728,108 @@ static void test_received_damage_and_level_up_publish_bounded_feedback(void) {
     ASSERT_EQ_INT((int)client->combat_message.time, BZ_WOW_COMBAT_MESSAGE_TIME);
 }
 
+/* A corpse is the single loot owner, and one successful atomic pickup consumes that ownership exactly once. */
+static void test_corpse_loot_generated_and_picked_once(void) {
+    LPEDICT player = make_player();
+    LPEDICT creature = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *creature_local = Wow_EntityLocal(creature);
+    wowClient_t *client = (wowClient_t *)player->client;
+
+    Wow_AIDie(creature, player);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_AVAILABLE);
+    ASSERT_EQ_INT((int)creature_local->num_loot, BZ_WOW_MAX_LOOT_ITEMS);
+    Wow_GenerateLoot(creature);
+    ASSERT_EQ_INT((int)creature_local->num_loot, BZ_WOW_MAX_LOOT_ITEMS);
+    ASSERT(Wow_LootCreature(player, creature));
+    ASSERT_EQ_INT((int)inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 1);
+    ASSERT_EQ_INT((int)inventory_count(client, WOW_ITEM_TRAINING_SWORD), 1);
+    ASSERT_EQ_INT((int)inventory_count(client, WOW_ITEM_PADDED_ARMOR), 1);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_PICKED);
+    ASSERT_EQ_INT((int)creature_local->num_loot, 0);
+    ASSERT(!Wow_LootCreature(player, creature));
+    ASSERT_EQ_INT((int)inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 1);
+}
+
+/* Failed preflight preserves both a full bag and the complete corpse loot list. */
+static void test_loot_pickup_is_atomic_when_inventory_full(void) {
+    LPEDICT player = make_player();
+    LPEDICT creature = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *creature_local = Wow_EntityLocal(creature);
+    wowClient_t *client = (wowClient_t *)player->client;
+    WOWITEMSTACK before[WOW_UI_INVENTORY_SLOTS];
+
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_TRAINING_SWORD, WOW_UI_INVENTORY_SLOTS));
+    memcpy(before, client->bag, sizeof(before));
+    Wow_AIDie(creature, player);
+    ASSERT(!Wow_LootCreature(player, creature));
+    ASSERT(!memcmp(before, client->bag, sizeof(before)));
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_AVAILABLE);
+    ASSERT_EQ_INT((int)creature_local->num_loot, BZ_WOW_MAX_LOOT_ITEMS);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_INVENTORY_FULL);
+}
+
+static void test_inventory_stacks_and_enforces_fixed_limit(void) {
+    LPEDICT player = make_player();
+    wowClient_t *client = (wowClient_t *)player->client;
+
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_MINOR_HEALING_POTION, 4));
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_MINOR_HEALING_POTION, 3));
+    ASSERT_EQ_INT((int)client->bag[0].count, 5);
+    ASSERT_EQ_INT((int)client->bag[1].count, 2);
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_TRAINING_SWORD, 4));
+    ASSERT(!Wow_GiveItem(player, WOW_ITEM_PADDED_ARMOR, 1));
+    ASSERT_EQ_INT((int)inventory_count(client, WOW_ITEM_PADDED_ARMOR), 0);
+}
+
+static void test_healing_potion_clamps_and_consumes_stack(void) {
+    LPEDICT player = make_player();
+    wowEntityLocal_t *local = Wow_EntityLocal(player);
+    wowClient_t *client = (wowClient_t *)player->client;
+    DWORD slot;
+
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_MINOR_HEALING_POTION, 2));
+    slot = inventory_slot(client, WOW_ITEM_MINOR_HEALING_POTION);
+    local->health = 90;
+    ASSERT(Wow_UseInventorySlot(player, slot));
+    ASSERT_EQ_INT((int)local->health, 100);
+    ASSERT_EQ_INT((int)client->bag[slot].count, 1);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_HEAL);
+    ASSERT_STR_EQ(client->combat_message.text, "+10 Health");
+    ASSERT(!Wow_UseInventorySlot(player, slot));
+    ASSERT_EQ_INT((int)client->bag[slot].count, 1);
+    local->health = 50;
+    ASSERT(Wow_UseInventorySlot(player, slot));
+    ASSERT_EQ_INT((int)local->health, 75);
+    ASSERT_EQ_INT((int)client->bag[slot].item, WOW_ITEM_NONE);
+    ASSERT_EQ_INT((int)client->bag[slot].count, 0);
+}
+
+static void test_equipment_changes_central_damage_paths(void) {
+    LPEDICT player = make_player();
+    LPEDICT creature = make_creature(4.0f, 0.0f);
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *creature_local = Wow_EntityLocal(creature);
+    wowClient_t *client = (wowClient_t *)player->client;
+
+    creature_local->health = creature_local->max_health = 10;
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_TRAINING_SWORD, 1));
+    ASSERT(Wow_UseInventorySlot(player, inventory_slot(client, WOW_ITEM_TRAINING_SWORD)));
+    ASSERT_EQ_INT((int)client->equipment[WOW_EQUIPMENT_WEAPON], WOW_ITEM_TRAINING_SWORD);
+    select_target(player, creature);
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_STRIKE));
+    run_melee_damage_point(player);
+    ASSERT_EQ_INT((int)creature_local->health, 8);
+
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_PADDED_ARMOR, 1));
+    ASSERT(Wow_UseInventorySlot(player, inventory_slot(client, WOW_ITEM_PADDED_ARMOR)));
+    ASSERT_EQ_INT((int)client->equipment[WOW_EQUIPMENT_ARMOR], WOW_ITEM_PADDED_ARMOR);
+    player_local->health = 50;
+    Wow_DealDamage(player, creature, 3);
+    ASSERT_EQ_INT((int)player_local->health, 48);
+    Wow_DealDamage(player, creature, 1);
+    ASSERT_EQ_INT((int)player_local->health, 47);
+}
+
 int main(void) {
     RUN_TEST(test_firebolt_spawns_projectile);
     RUN_TEST(test_firebolt_homing_moves_toward_target);
@@ -737,5 +853,10 @@ int main(void) {
     RUN_TEST(test_throw_cooldown_prevents_duplicate_projectiles);
     RUN_TEST(test_throw_projectile_kill_credits_xp_once);
     RUN_TEST(test_received_damage_and_level_up_publish_bounded_feedback);
+    RUN_TEST(test_corpse_loot_generated_and_picked_once);
+    RUN_TEST(test_loot_pickup_is_atomic_when_inventory_full);
+    RUN_TEST(test_inventory_stacks_and_enforces_fixed_limit);
+    RUN_TEST(test_healing_potion_clamps_and_consumes_stack);
+    RUN_TEST(test_equipment_changes_central_damage_paths);
     TEST_RESULTS();
 }
