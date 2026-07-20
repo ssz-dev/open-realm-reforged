@@ -2,6 +2,7 @@
 #define G_WOW_LOCAL_H
 
 #include "server/server.h"
+#include "common/wow_world_query.h"
 #include "common/wow_ui_shared.h"
 #include "common/ui_constants.h"
 
@@ -34,6 +35,18 @@
 #define BZ_WOW_CREATURE_REGEN_TIME 500
 #define BZ_WOW_CREATURE_RESPAWN_TIME 5000
 #define BZ_WOW_CREATURE_ATTACK_DAMAGE 1
+#define BZ_WOW_GRAVITY 19.6f
+#define BZ_WOW_TERMINAL_VELOCITY 60.0f
+#define BZ_WOW_STEP_HEIGHT 0.75f
+#define BZ_WOW_GROUND_SNAP_DOWN 1.0f
+#define BZ_WOW_GROUND_QUERY_DOWN 128.0f
+#define BZ_WOW_GROUND_BLOCK_UP 3.0f
+#define BZ_WOW_GROUND_PLACE_DOWN 2048.0f
+#define BZ_WOW_GROUND_PLACE_UP 128.0f
+#define BZ_WOW_MAX_SLOPE_Z 0.642788f
+#define BZ_WOW_MOVE_SUBSTEP 0.5f
+#define BZ_WOW_TIME_SUBSTEP 0.1f
+#define BZ_WOW_MAX_MOVE_SUBSTEPS 128.0f
 #define BZ_WOW_STRIKE_DAMAGE 1
 #define BZ_WOW_HEAVY_STRIKE_DAMAGE 3
 #define BZ_WOW_HEAVY_STRIKE_RAGE 20
@@ -228,6 +241,7 @@ typedef struct {
     LPCANIMATION animation;
     LPWOWMOVE currentmove;
     VECTOR2 home;
+    FLOAT home_z;
     FLOAT yaw;
     FLOAT patrol_radius;
     FLOAT patrol_phase;
@@ -239,6 +253,11 @@ typedef struct {
     DWORD level;
     DWORD xp;
     DWORD xp_reward;
+    FLOAT vertical_velocity;
+    FLOAT ground_height;
+    VECTOR3 ground_normal;
+    wowSurfaceType_t ground_surface;
+    BOOL grounded;
     DWORD attack_damage;
     DWORD attack_damage_point;
     DWORD attack_backswing;
@@ -329,7 +348,6 @@ BOOL Wow_FindDbcRecord(LPCSTR filename,
                        BYTE const **record_out,
                        BYTE const **strings_out,
                        DWORD *string_size_out);
-FLOAT Wow_TerrainHeight(FLOAT x, FLOAT y);
 LPCSTR CM_WowAreaNameAtPoint(FLOAT x, FLOAT y);
 DWORD Wow_EntityIndex(LPCEDICT ent);
 wowEntityLocal_t *Wow_EntityLocal(LPCEDICT ent);
@@ -338,6 +356,8 @@ BOOL Wow_SetEntityMove(LPEDICT ent, LPWOWMOVE move);
 BOOL Wow_SetEntityMoveFirstAnimation(LPEDICT ent, LPWOWMOVE move, LPCSTR const *animation_names);
 void Wow_AdvanceEntityFrame(LPEDICT ent);
 LPEDICT Wow_Spawn(void);
+BOOL Wow_PlaceEntityOnGround(LPEDICT ent, LPCVECTOR3 position);
+BOOL Wow_MoveEntity(LPEDICT ent, LPCVECTOR2 displacement, FLOAT seconds);
 void Wow_AIIdle(LPEDICT ent);
 void Wow_AIMove(LPEDICT ent);
 void Wow_AIAttack(LPEDICT ent);

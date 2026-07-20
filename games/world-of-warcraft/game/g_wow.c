@@ -359,10 +359,6 @@ static void Wow_SelectLoadingScreen(LPCSTR map_path) {
     gi.MemFree(data);
 }
 
-FLOAT Wow_TerrainHeight(FLOAT x, FLOAT y) {
-    return CM_GetHeightAtPoint(x, y);
-}
-
 static FLOAT Wow_ViewPitch(FLOAT wrapped_pitch) {
     return wrapped_pitch > 180.0f ? 360.0f - wrapped_pitch : -wrapped_pitch;
 }
@@ -534,7 +530,16 @@ void Wow_RunProjectile(LPEDICT ent) {
         /* Move toward target (homing). */
         ent->s.origin.x += delta.x * step / dist;
         ent->s.origin.y += delta.y * step / dist;
-        ent->s.origin.z = Wow_TerrainHeight(ent->s.origin.x, ent->s.origin.y) + 3.0f;
+        {
+            WOWGROUNDQUERY query = {
+                .origin = ent->s.origin,
+                .max_down = BZ_WOW_GROUND_QUERY_DOWN,
+                .max_up = BZ_WOW_GROUND_PLACE_UP,
+            };
+            WOWGROUNDRESULT ground;
+
+            if (CM_WowQueryGround(&query, &ground)) ent->s.origin.z = ground.height + 3.0f;
+        }
         ent->s.angle = (FLOAT)DEG2RAD(local->projectile_yaw);
     }
 }
@@ -1093,7 +1098,11 @@ static void Wow_ReadSelectedCharFromCS(char *race, size_t race_sz, char *sex, si
 static void Wow_InitPlayer(LPEDICT ent) {
     LPPLAYER ps;
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
-    FLOAT height = Wow_TerrainHeight(wow_spawn_origin.x, wow_spawn_origin.y);
+    VECTOR3 spawn = {
+        wow_spawn_origin.x,
+        wow_spawn_origin.y,
+        CM_GetHeightAtPoint(wow_spawn_origin.x, wow_spawn_origin.y),
+    };
     char race[64], sex[64];
     DWORD class_id, appearance;
     char model_path[MAX_PATHLEN * 2];
@@ -1107,6 +1116,7 @@ static void Wow_InitPlayer(LPEDICT ent) {
         local->kind = WOW_ENTITY_PLAYER;
         local->hostile = false;
         local->home = wow_spawn_origin;
+        local->home_z = spawn.z;
         local->yaw = wow_move.yaw;
         local->attack_damage = BZ_WOW_STRIKE_DAMAGE;
         local->attack_damage_point = 250;
@@ -1123,7 +1133,7 @@ static void Wow_InitPlayer(LPEDICT ent) {
                                          WOW_PLAYER_EQUIPMENT_LOWER_BODY,
                                          WOW_PLAYER_EQUIPMENT_HANDS,
                                          WOW_PLAYER_EQUIPMENT_FEET);
-    ent->s.origin = (VECTOR3){ wow_spawn_origin.x, wow_spawn_origin.y, height };
+    ent->s.origin = spawn;
     ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
     ent->s.angle = (FLOAT)DEG2RAD(wow_move.yaw);
     ent->s.scale = 1.0f;
@@ -1134,6 +1144,10 @@ static void Wow_InitPlayer(LPEDICT ent) {
     ent->run = NULL;
     ent->attack = Wow_AIAttack;
     ent->pain = Wow_AIPain;
+    if (!Wow_PlaceEntityOnGround(ent, &spawn))
+        fprintf(stderr, "OpenWoW physics: player spawn has no terrain contact at %.3f %.3f %.3f\n",
+                (double)spawn.x, (double)spawn.y, (double)spawn.z);
+    local->home_z = ent->s.origin.z;
     Wow_SetStandMove(ent);
 
     ps = &ent->client->ps;
@@ -1341,6 +1355,8 @@ static void Wow_RunFrame(void) {
     VECTOR2 forward;
     VECTOR2 right;
     VECTOR2 dir = { 0.0f, 0.0f };
+    VECTOR2 displacement = { 0.0f, 0.0f };
+    FLOAT seconds = (FLOAT)FRAMETIME / 1000.0f;
     FLOAT len;
     BOOL moving;
     BOOL locked;
@@ -1378,13 +1394,10 @@ static void Wow_RunFrame(void) {
 
     len = sqrtf(dir.x * dir.x + dir.y * dir.y);
     moving = len > 0.001f;
-    ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
     if (moving) {
-        FLOAT step = (wow_move.gm ? BZ_WOW_GM_SPEED : WOW_WALK_SPEED) * ((FLOAT)FRAMETIME / 1000.0f) / len;
-        ent->s.origin.x += dir.x * step;
-        ent->s.origin.y += dir.y * step;
+        FLOAT step = (wow_move.gm ? BZ_WOW_GM_SPEED : WOW_WALK_SPEED) * seconds / len;
+        displacement = (VECTOR2){ dir.x * step, dir.y * step };
     }
-    ent->s.origin.z = Wow_TerrainHeight(ent->s.origin.x, ent->s.origin.y);
     locked = Wow_AIAdvanceLockedFrame(ent);
     /* Auto-chase: move toward enemy when in combat, not pressing WASD, and
      * not locked in an animation (attack/cast/pain).  This comes after
@@ -1397,14 +1410,12 @@ static void Wow_RunFrame(void) {
             VECTOR2 delta = Vector2_sub(&enemy->s.origin2, &ent->s.origin2);
             FLOAT dist = Vector2_len(&delta);
             if (dist > WOW_MELEE_RANGE) {
-                FLOAT step = MIN(WOW_WALK_SPEED * ((FLOAT)FRAMETIME / 1000.0f), dist - WOW_MELEE_RANGE);
-                ent->s.origin.x += delta.x * step / dist;
-                ent->s.origin.y += delta.y * step / dist;
-                ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
-                moving = true;
+                FLOAT step = MIN(WOW_WALK_SPEED * seconds, dist - WOW_MELEE_RANGE);
+                displacement = (VECTOR2){ delta.x * step / dist, delta.y * step / dist };
             }
         }
     }
+    moving = Wow_MoveEntity(ent, &displacement, seconds);
     if (!locked && Wow_EntityAffectingCombat(ent)) {
         ent->attack(ent);
         /* If the attack started, treat as locked so the Run animation below
@@ -1490,6 +1501,7 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
         char *x_end;
         char *y_end;
         VECTOR2 position;
+        VECTOR3 grounded_position;
         BOX2 bounds;
 
         if (!wow_move.gm) {
@@ -1512,9 +1524,12 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
                     (double)position.x, (double)position.y);
             return;
         }
-        /* GM teleport still grounds the player so the existing 2D camera contract remains authoritative. */
-        ent->s.origin = (VECTOR3){ position.x, position.y, Wow_TerrainHeight(position.x, position.y) };
-        ent->s.origin2 = position;
+        grounded_position = (VECTOR3){ position.x, position.y, ent->s.origin.z };
+        if (!Wow_PlaceEntityOnGround(ent, &grounded_position)) {
+            fprintf(stderr, "OpenWoW GM: teleport %.2f %.2f has no valid ground contact\n",
+                    (double)position.x, (double)position.y);
+            return;
+        }
         Wow_UpdateCamera(ent);
         fprintf(stderr, "OpenWoW GM: teleported to %.2f %.2f %.2f\n",
                 (double)ent->s.origin.x, (double)ent->s.origin.y, (double)ent->s.origin.z);

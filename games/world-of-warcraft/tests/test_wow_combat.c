@@ -30,6 +30,8 @@ static animation_t g_death_anim = {
 
 static DWORD g_pain_calls = 0;
 static wowClient_t g_player_client;
+static BOOL g_ground_enabled = true;
+static FLOAT g_ground_slope_x;
 
 void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD value) {
     (void)player;
@@ -37,10 +39,20 @@ void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD val
     (void)value;
 }
 
-FLOAT Wow_TerrainHeight(FLOAT x, FLOAT y) {
-    (void)x;
-    (void)y;
-    return 7.0f;
+BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
+    FLOAT height;
+
+    if (!g_ground_enabled || !query || !result) return false;
+    height = 7.0f + g_ground_slope_x * query->origin.x;
+    if (height < query->origin.z - query->max_down || height > query->origin.z + query->max_up)
+        return false;
+    *result = (WOWGROUNDRESULT){
+        .height = height,
+        .normal = { -g_ground_slope_x, 0.0f, 1.0f },
+        .surface = WOW_SURFACE_TERRAIN,
+    };
+    Vector3_normalize(&result->normal);
+    return true;
 }
 
 DWORD Wow_EntityIndex(LPCEDICT ent) {
@@ -139,6 +151,8 @@ static void test_reset_world(void) {
     memset(wow_entity_locals, 0, sizeof(wow_entity_locals));
     memset(&g_player_client, 0, sizeof(g_player_client));
     g_pain_calls = 0;
+    g_ground_enabled = true;
+    g_ground_slope_x = 0.0f;
 }
 
 static void test_prepare_pair(LPEDICT *attacker_out, LPEDICT *target_out) {
@@ -197,6 +211,11 @@ static void test_prepare_player_creature(LPEDICT *player_out, LPEDICT *creature_
     player_local->level = 1;
     player_local->hostile = false;
     player_local->enemy = NULL;
+    player->s.origin.z = 7.0f;
+    player_local->grounded = true;
+    player_local->ground_height = 7.0f;
+    player_local->ground_normal = (VECTOR3){ 0.0f, 0.0f, 1.0f };
+    player_local->ground_surface = WOW_SURFACE_TERRAIN;
     creature->svflags = SVF_MONSTER;
     creature->idle = Wow_AIIdle;
     creature->move = Wow_AIMove;
@@ -210,6 +229,12 @@ static void test_prepare_player_creature(LPEDICT *player_out, LPEDICT *creature_
     creature_local->attack_backswing = 300;
     creature_local->enemy = NULL;
     creature_local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    creature->s.origin.z = 7.0f;
+    creature_local->home_z = 7.0f;
+    creature_local->grounded = true;
+    creature_local->ground_height = 7.0f;
+    creature_local->ground_normal = (VECTOR3){ 0.0f, 0.0f, 1.0f };
+    creature_local->ground_surface = WOW_SURFACE_TERRAIN;
     *player_out = player;
     *creature_out = creature;
 }
@@ -520,8 +545,35 @@ static void test_wow_creature_leashes_and_regenerates_without_xp(void) {
     before = creature->s.origin.x;
     FOR_LOOP(i, 5) Wow_AIRunFrame(creature);
     ASSERT(creature->s.origin.x < before);
+    ASSERT(creature_local->grounded);
+    ASSERT_EQ_FLOAT(creature->s.origin.z, 7.0f, 0.001f);
     ASSERT_EQ_INT((int)creature_local->health, 2);
     ASSERT_EQ_INT((int)player_local->xp, 0);
+}
+
+static void test_wow_creature_chase_and_evade_follow_uneven_ground(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+
+    test_prepare_player_creature(&player, &creature);
+    local = Wow_EntityLocal(creature);
+    g_ground_slope_x = 0.1f;
+    player->s.origin.x = player->s.origin2.x = 10.0f;
+    Wow_AIRunFrame(creature);
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_CHASE);
+    ASSERT(creature->s.origin.x > 0.0f);
+    ASSERT_EQ_FLOAT(creature->s.origin.z, 7.0f + creature->s.origin.x * 0.1f, 0.001f);
+    ASSERT(local->grounded);
+
+    player->s.origin.x = player->s.origin2.x = local->home.x + BZ_WOW_CREATURE_LEASH_RANGE + 1.0f;
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_EVADE);
+    FOR_LOOP(i, 3) Wow_AIRunFrame(creature);
+    ASSERT_EQ_FLOAT(creature->s.origin.x, local->home.x, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.z, 7.0f + local->home.x * g_ground_slope_x, 0.001f);
+    ASSERT(local->grounded);
 }
 
 static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
@@ -573,9 +625,35 @@ static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
     ASSERT_EQ_FLOAT(creature->s.origin.x, creature_local->home.x, 0.001f);
     ASSERT_EQ_FLOAT(creature->s.origin.y, creature_local->home.y, 0.001f);
     ASSERT_EQ_FLOAT(creature->s.origin.z, 7.0f, 0.001f);
+    ASSERT(creature_local->grounded);
+    ASSERT_EQ_INT((int)creature_local->ground_surface, WOW_SURFACE_TERRAIN);
     ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 255);
     ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_NONE);
     ASSERT_EQ_INT((int)creature_local->num_loot, 0);
+}
+
+static void test_wow_creature_respawn_defers_without_ground(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+    VECTOR3 before;
+
+    test_prepare_player_creature(&player, &creature);
+    (void)player;
+    local = Wow_EntityLocal(creature);
+    local->dead = true;
+    local->ai_state = WOW_AI_RESPAWN;
+    local->respawn_time = 0;
+    local->home = (VECTOR2){ 12.0f, 8.0f };
+    local->home_z = 7.0f;
+    before = creature->s.origin;
+    g_ground_enabled = false;
+    Wow_AIRunFrame(creature);
+    ASSERT(local->dead);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_RESPAWN);
+    ASSERT_EQ_INT((int)local->respawn_time, BZ_WOW_CREATURE_RESPAWN_TIME);
+    ASSERT_EQ_FLOAT(creature->s.origin.x, before.x, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.z, before.z, 0.001f);
 }
 
 int main(void) {
@@ -594,6 +672,8 @@ int main(void) {
     RUN_TEST(test_wow_creature_aggros_projectile_caster);
     RUN_TEST(test_wow_creature_attack_uses_cooldown_and_real_player_vitals);
     RUN_TEST(test_wow_creature_leashes_and_regenerates_without_xp);
+    RUN_TEST(test_wow_creature_chase_and_evade_follow_uneven_ground);
     RUN_TEST(test_wow_creature_death_awards_once_and_respawns_clean);
+    RUN_TEST(test_wow_creature_respawn_defers_without_ground);
     TEST_RESULTS();
 }

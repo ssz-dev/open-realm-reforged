@@ -34,6 +34,7 @@ static DWORD test_unicast_calls;
 static DWORD test_hud_write_calls;
 static DWORD test_quest_show_calls;
 static DWORD test_quest_hide_calls;
+static DWORD test_adt_reads;
 static char test_last_error[512];
 static char test_save_path[MAX_PATHLEN];
 
@@ -234,20 +235,43 @@ static HANDLE make_area_table_dbc(LPDWORD size_out) {
     return data;
 }
 
-static HANDLE make_area_adt(LPDWORD size_out) {
-    DWORD chunk_size = 0x80;
-    LPBYTE data = calloc(1, 8 + chunk_size);
-    LPBYTE chunk = data + 8;
+/* A complete artificial flat ADT makes every game-path query deterministic without real WoW data. */
+static HANDLE make_area_adt(int tile_x, int tile_y, LPDWORD size_out) {
+    enum { MCVT_SIZE = 145 * sizeof(FLOAT), MCNK_SIZE = 0x80 + 8 + MCVT_SIZE };
+    FLOAT const tile_size = 533.333313f;
+    FLOAT const chunk_size = tile_size / 16.0f;
+    DWORD size = 16 * 16 * (8 + MCNK_SIZE);
+    LPBYTE data = calloc(1, size);
+    DWORD offset = 0;
 
-    memcpy(data, "KNCM", 4);
-    put32(data + 4, chunk_size);
-    put32(chunk + 0x04, 10);
-    put32(chunk + 0x08, 13);
-    put32(chunk + 0x34, 228);
-    putfloat(chunk + 0x68, 133.0f);
-    putfloat(chunk + 0x6c, 233.0f);
-    *size_out = 8 + chunk_size;
+    FOR_LOOP(row, 16) {
+        FOR_LOOP(col, 16) {
+            LPBYTE chunk = data + offset + 8;
+            LPBYTE mcvt = chunk + 0x80;
+
+            memcpy(data + offset, "KNCM", 4);
+            put32(data + offset + 4, MCNK_SIZE);
+            put32(chunk + 0x04, col);
+            put32(chunk + 0x08, row);
+            put32(chunk + 0x34, tile_x == 31 && tile_y == 31 && row == 13 && col == 10 ? 228 : 0);
+            putfloat(chunk + 0x68, (32.0f - tile_y) * tile_size - row * chunk_size);
+            putfloat(chunk + 0x6c, (32.0f - tile_x) * tile_size - col * chunk_size);
+            putfloat(chunk + 0x70, 20.0f);
+            memcpy(mcvt, "TVCM", 4);
+            put32(mcvt + 4, MCVT_SIZE);
+            offset += 8 + MCNK_SIZE;
+        }
+    }
+    *size_out = size;
     return data;
+}
+
+static BOOL parse_area_adt_path(LPCSTR filename, int *tile_x, int *tile_y) {
+    LPCSTR base = filename;
+
+    for (LPCSTR p = filename; p && *p; p++)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    return base && sscanf(base, "Azeroth_%d_%d.adt", tile_x, tile_y) == 2;
 }
 
 static BOOL path_eq(LPCSTR a, LPCSTR b) {
@@ -266,6 +290,7 @@ static BOOL path_eq(LPCSTR a, LPCSTR b) {
 
 static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
     static BYTE artificial_firebolt;
+    int tile_x, tile_y;
 
     if (path_eq(filename, "DBFilesClient\\Map.dbc")) {
         return make_map_dbc(size);
@@ -285,8 +310,9 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
     if (path_eq(filename, "DBFilesClient\\AreaTable.dbc")) {
         return make_area_table_dbc(size);
     }
-    if (path_eq(filename, "World\\Maps\\Azeroth\\Azeroth_31_31.adt")) {
-        return make_area_adt(size);
+    if (parse_area_adt_path(filename, &tile_x, &tile_y)) {
+        test_adt_reads++;
+        return make_area_adt(tile_x, tile_y, size);
     }
     if (path_eq(filename, "Spells\\Fireball_Missile_High.m2")) {
         if (size) *size = 1;
@@ -536,6 +562,7 @@ static void reset_test_state(void) {
     test_hud_write_calls = 0;
     test_quest_show_calls = 0;
     test_quest_hide_calls = 0;
+    test_adt_reads = 0;
     memset(test_last_error, 0, sizeof(test_last_error));
     memset(test_configstrings, 0, sizeof(test_configstrings));
     test_save_path[0] = '\0';
@@ -619,6 +646,44 @@ static void assert_player_spawned_at_safe_loc(LPEDICT player) {
     ASSERT(matched);
 }
 
+/* The central floor query reports validity, normal, and surface from an artificial ADT. */
+static void test_wow_ground_query_reads_artificial_adt(void) {
+    struct game_export *game = init_game();
+    WOWGROUNDQUERY query = {
+        .origin = { 100.0f, 200.0f, 20.25f },
+        .max_down = 1.0f,
+        .max_up = 0.25f,
+    };
+    WOWGROUNDRESULT ground;
+
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    ASSERT(CM_WowQueryGround(&query, &ground));
+    ASSERT_EQ_FLOAT(ground.height, 20.0f, 0.001f);
+    ASSERT_EQ_FLOAT(ground.normal.x, 0.0f, 0.001f);
+    ASSERT_EQ_FLOAT(ground.normal.y, 0.0f, 0.001f);
+    ASSERT_EQ_FLOAT(ground.normal.z, 1.0f, 0.001f);
+    ASSERT_EQ_INT((int)ground.surface, WOW_SURFACE_TERRAIN);
+    ASSERT_EQ_INT((int)test_adt_reads, 1);
+    ASSERT(CM_WowQueryGround(&query, &ground));
+    ASSERT_EQ_INT((int)test_adt_reads, 1);
+    FOR_LOOP(i, 9) {
+        query.origin.x = 100.0f + (FLOAT)(i + 1) * 533.333313f;
+        ASSERT(CM_WowQueryGround(&query, &ground));
+    }
+    ASSERT_EQ_INT((int)test_adt_reads, 10);
+    query.origin.x = 100.0f;
+    ASSERT(CM_WowQueryGround(&query, &ground));
+    ASSERT_EQ_INT((int)test_adt_reads, 11);
+    query.origin.z = 0.0f;
+    query.max_up = 1.0f;
+    ASSERT(!CM_WowQueryGround(&query, &ground));
+    ASSERT_EQ_INT((int)ground.surface, WOW_SURFACE_NONE);
+    query.origin = (VECTOR3){ 40000.0f, 40000.0f, 0.0f };
+    query.max_down = query.max_up = 100.0f;
+    ASSERT(!CM_WowQueryGround(&query, &ground));
+    if (game->Shutdown) game->Shutdown();
+}
+
 static void test_wow_load_map_initializes_player_state(void) {
     struct game_export *game = init_game();
     LPEDICT player;
@@ -640,6 +705,8 @@ static void test_wow_load_map_initializes_player_state(void) {
     ASSERT_EQ_INT((int)local->max_power, BZ_WOW_PLAYER_MAX_POWER);
     ASSERT_EQ_INT((int)local->level, 1);
     ASSERT_EQ_INT((int)local->xp, 0);
+    ASSERT(local->grounded);
+    ASSERT_EQ_INT((int)local->ground_surface, WOW_SURFACE_TERRAIN);
     ASSERT_EQ_INT((int)((wowClient_t *)player->client)->quest.id, WOW_QUEST_FIRST_HUNT);
     ASSERT_EQ_INT((int)((wowClient_t *)player->client)->quest.state, WOW_QUEST_AVAILABLE);
     ASSERT_EQ_INT((int)player->s.stats[ENT_HEALTH], 255);
@@ -711,10 +778,13 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     ASSERT_EQ_FLOAT(creature->s.radius, 1.5f, 0.001f);
     ASSERT_NOT_NULL(creature_local->animation);
     ASSERT_STR_EQ(creature_local->animation->name, "Walk");
+    ASSERT(creature_local->grounded);
 
     game->RunFrame();
     ASSERT(fabsf(creature->s.origin2.x - before.x) > 0.001f ||
            fabsf(creature->s.origin2.y - before.y) > 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.z,
+                    CM_GetHeightAtPoint(creature->s.origin.x, creature->s.origin.y), 0.001f);
 
     game->ClientCommand(player, 2, attack_argv);
     ASSERT_EQ_INT((int)(player_local->enemy ? player_local->enemy->s.number : 0), 1);
@@ -1456,6 +1526,7 @@ static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
 }
 
 int main(void) {
+    RUN_TEST(test_wow_ground_query_reads_artificial_adt);
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
     RUN_TEST(test_wow_action_commands_bind_three_server_abilities);

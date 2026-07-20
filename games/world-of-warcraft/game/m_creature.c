@@ -193,6 +193,7 @@ static void Wow_MonsterStart(LPEDICT ent,
     local->hostile = true;
     local->display_id = display_id;
     local->home = home ? *home : ent->s.origin2;
+    local->home_z = ent->s.origin.z;
     local->yaw = yaw;
     local->patrol_radius = patrol_radius;
     local->patrol_phase = (FLOAT)DEG2RAD(yaw);
@@ -248,11 +249,17 @@ static LPEDICT Wow_SpawnCreature(DWORD display_id,
                 model_path);
         return NULL;
     }
-    ent->s.origin = (VECTOR3){ origin->x, origin->y, Wow_TerrainHeight(origin->x, origin->y) };
+    ent->s.origin = (VECTOR3){ origin->x, origin->y, wow_edicts[0].s.origin.z };
     ent->s.origin2 = *origin;
     ent->s.scale = scale;
     ent->s.radius = radius;
     ent->s.player = 2;
+    if (!Wow_PlaceEntityOnGround(ent, &ent->s.origin)) {
+        ent->inuse = false;
+        fprintf(stderr, "WoW creature display %u skipped: no terrain contact at %.3f %.3f\n",
+                (unsigned)display_id, (double)origin->x, (double)origin->y);
+        return NULL;
+    }
     Wow_MonsterStart(ent, display_id, origin, yaw, patrol_radius, walk_speed);
     return ent;
 }

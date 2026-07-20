@@ -8,8 +8,8 @@ LIB_DIR := build/lib
 CFLAGS  := -Wall -Wmisleading-indentation -fno-common -I. -Ishared -Ishared/types
 WOW_DIR := games/world-of-warcraft
 WOW_TEST_DIR := $(WOW_DIR)/tests
-WOW_GAMEPLAY_TEST_SRCS := $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/g_inventory.c $(WOW_DIR)/game/g_quest.c \
-	$(WOW_DIR)/game/g_progress.c
+WOW_GAMEPLAY_TEST_SRCS := $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/g_inventory.c $(WOW_DIR)/game/g_physics.c \
+	$(WOW_DIR)/game/g_quest.c $(WOW_DIR)/game/g_progress.c
 WOW_DATA_DIR := data/world-of-warcraft
 WOW_ISO_DIR ?= $(ISO_DIR)
 WOW_ISO_EXTRACT_DIR ?= build/wow-install
@@ -305,6 +305,7 @@ clean:
 	rm -rf build
 
 $(eval $(call test_schema,test-wow-appearance,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_appearance$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_appearance.c common/msg.c common/net.c $(call CSRC,shared),-lm,))
+$(eval $(call test_schema,test-wow-physics,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_physics$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_physics.c $(WOW_DIR)/game/g_physics.c $(call CSRC,shared),-lm,))
 $(eval $(call test_schema,test-wow-combat,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_combat$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_combat.c $(WOW_GAMEPLAY_TEST_SRCS) $(call CSRC,shared),-lm,))
 $(eval $(call test_schema,test-wow-abilities,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_abilities$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_abilities.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_GAMEPLAY_TEST_SRCS) $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
 $(eval $(call test_schema,test-wow-game,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_game$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_game.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_GAMEPLAY_TEST_SRCS) $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
@@ -376,4 +377,4 @@ test-sc2-live: opensc2 $(SC2_HUD_LIVE_BIN)
 	fi
 	$(SC2_HUD_LIVE_BIN)
 
-.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-hud test-wow-renderer test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live $(WC3_PHONY)
+.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-wow-appearance test-wow-physics test-wow-combat test-wow-abilities test-wow-game test-wow-hud test-wow-renderer test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live $(WC3_PHONY)

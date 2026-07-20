@@ -329,6 +329,7 @@ void Wow_AIMove(LPEDICT ent) {
     VECTOR2 delta;
     FLOAT len;
     FLOAT step;
+    VECTOR2 displacement;
 
     if (!ent || !local) {
         return;
@@ -345,9 +346,11 @@ void Wow_AIMove(LPEDICT ent) {
     }
 
     step = MIN(local->walk_speed * ((FLOAT)FRAMETIME / 1000.0f), len);
-    ent->s.origin.x += delta.x * step / len;
-    ent->s.origin.y += delta.y * step / len;
-    ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
+    displacement = (VECTOR2){ delta.x * step / len, delta.y * step / len };
+    if (!Wow_MoveEntity(ent, &displacement, (FLOAT)FRAMETIME / 1000.0f)) {
+        Wow_SetStandMove(ent);
+        return;
+    }
     local->yaw = (FLOAT)RAD2DEG(atan2f(delta.y, delta.x));
     ent->s.angle = (FLOAT)DEG2RAD(local->yaw);
     Wow_SetWalkMove(ent);
@@ -556,16 +559,15 @@ static BOOL Wow_AIMoveToward(LPEDICT ent, LPCVECTOR2 target, FLOAT speed, FLOAT 
     VECTOR2 delta;
     FLOAT distance;
     FLOAT step;
+    VECTOR2 displacement;
 
     if (!ent || !local || !target) return false;
     delta = Vector2_sub(target, &ent->s.origin2);
     distance = Vector2_len(&delta);
     if (distance <= stop_distance || distance <= 0.001f) return false;
     step = MIN(speed * ((FLOAT)FRAMETIME / 1000.0f), distance - stop_distance);
-    ent->s.origin.x += delta.x * step / distance;
-    ent->s.origin.y += delta.y * step / distance;
-    ent->s.origin.z = Wow_TerrainHeight(ent->s.origin.x, ent->s.origin.y);
-    ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
+    displacement = (VECTOR2){ delta.x * step / distance, delta.y * step / distance };
+    if (!Wow_MoveEntity(ent, &displacement, (FLOAT)FRAMETIME / 1000.0f)) return true;
     local->yaw = (FLOAT)RAD2DEG(atan2f(delta.y, delta.x));
     ent->s.angle = (FLOAT)DEG2RAD(local->yaw);
     Wow_SetRunMove(ent);
@@ -617,8 +619,16 @@ static void Wow_AIRegenerate(LPEDICT ent, wowEntityLocal_t *local) {
 /* Respawn reuses the same edict while restoring every combat-owned field to its spawn contract. */
 static void Wow_AIRespawn(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    VECTOR3 home;
 
     if (!ent || !local || local->kind != WOW_ENTITY_CREATURE) return;
+    home = (VECTOR3){ local->home.x, local->home.y, local->home_z };
+    if (!Wow_PlaceEntityOnGround(ent, &home)) {
+        local->respawn_time = BZ_WOW_CREATURE_RESPAWN_TIME;
+        fprintf(stderr, "OpenWoW physics: creature %u respawn deferred without ground at %.3f %.3f\n",
+                (unsigned)ent->s.number, (double)home.x, (double)home.y);
+        return;
+    }
     local->dead = false;
     local->ai_state = WOW_AI_IDLE;
     local->health = local->max_health;
@@ -626,8 +636,6 @@ static void Wow_AIRespawn(LPEDICT ent) {
     local->death_time = local->respawn_time = local->regen_time = 0;
     Wow_ResetAttack(local);
     Wow_ClearLoot(ent);
-    ent->s.origin = (VECTOR3){ local->home.x, local->home.y, Wow_TerrainHeight(local->home.x, local->home.y) };
-    ent->s.origin2 = local->home;
     ent->svflags = (ent->svflags | SVF_MONSTER) & ~SVF_DEADMONSTER;
     ent->selected = 0;
     Wow_SyncEntityVitals(ent);
@@ -670,6 +678,7 @@ void Wow_AIRunFrame(LPEDICT ent) {
             return;
         }
         if (local->patrol_radius <= 0.0f || local->walk_speed <= 0.0f) {
+            (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
             if (ent->idle) ent->idle(ent);
             Wow_AdvanceEntityFrame(ent);
             return;
@@ -684,13 +693,17 @@ void Wow_AIRunFrame(LPEDICT ent) {
         Wow_AIEnterEvade(ent);
         return;
     }
-    if (Wow_AIAdvanceLockedFrame(ent)) return;
+    if (Wow_AIAdvanceLockedFrame(ent)) {
+        (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
+        return;
+    }
     target_distance = Wow_Distance2(&local->enemy->s.origin2, &ent->s.origin2);
     if (target_distance > WOW_MELEE_RANGE) {
         local->ai_state = WOW_AI_CHASE;
         Wow_AIMoveToward(ent, &local->enemy->s.origin2, BZ_WOW_CREATURE_CHASE_SPEED, WOW_MELEE_RANGE);
     } else {
         local->ai_state = WOW_AI_ATTACK;
+        (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
         if (ent->attack) ent->attack(ent);
     }
     Wow_AdvanceEntityFrame(ent);
