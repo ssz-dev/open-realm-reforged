@@ -1,4 +1,5 @@
 #include "common/mpq.h"
+#include "common/wow_m2_format.h"
 #include "tool_common.h"
 
 #include <stdio.h>
@@ -31,9 +32,12 @@ static void usage(void) {
         "  mpqtool -mpq <archive.mpq> cat <file>\n"
         "  mpqtool -mpq <archive.mpq> info <file>\n"
         "  mpqtool -mpq <archive.mpq> imginfo <file>\n"
+        "  mpqtool -mpq <archive.mpq> m2info <file>\n"
         "  mpqtool -mpq <archive.mpq> grep <text> [path]\n"
         "  mpqtool -data <dir> grep <text> [path]\n"
         "  mpqtool -data <dir> cat <file>\n"
+        "  mpqtool -data <dir> m2info <file>\n"
+        "  mpqtool -data <dir> doodadinfo <adt-file>\n"
         "  mpqtool -mpq <archive.mpq> create [max-files]\n"
         "  mpqtool -mpq <archive.mpq> pack <src> <archive-file> [<src> <archive-file> ...]\n"
         "  mpqtool wow-install [-strip-data-prefix] <output-dir> <disc1.mpq> <disc2.mpq> <disc3.mpq> <disc4.mpq>\n"
@@ -59,6 +63,8 @@ static void usage(void) {
         "  mpqtool -data data/StarCraft2 grep UI/ResourceIconMinerals\n"
         "  mpqtool -data data/StarCraft2 cat GameData/Assets.txt\n");
 }
+
+static bool read_archive_file(HANDLE archive, const char *path, BYTE **out_data, DWORD *out_size);
 
 static unsigned short rd_u16le(const unsigned char *p) {
     return (unsigned short)(p[0] | (p[1] << 8));
@@ -328,6 +334,50 @@ static int cmd_info(HANDLE archive, const char *file_path) {
     printf("single_unit=%s\n", (fd.dwFileFlags & 0x01000000u) ? "yes" : "no");
     printf("exists=%s\n", (fd.dwFileFlags & 0x80000000u) ? "yes" : "no");
     return 0;
+}
+
+static int print_m2info(const char *file_path, BYTE const *data, DWORD size) {
+    WOWM2COLLISIONVIEW view;
+    wowM2CollisionStatus_t status = WowM2_ParseCollision(data, size, &view);
+
+    printf("file=%s\n", file_path);
+    printf("size=%u\n", (unsigned)size);
+    if (status == WOW_M2_COLLISION_MALFORMED) {
+        printf("collision=malformed\n");
+        return 1;
+    }
+    printf("version=%u\n", (unsigned)view.version);
+    if (status == WOW_M2_COLLISION_NONE) {
+        printf("collision=decoration\n");
+        printf("collision_vertices=0\ncollision_indices=0\ncollision_triangles=0\n");
+        return 0;
+    }
+    printf("collision=solid\n");
+    printf("collision_vertices=%u\n", (unsigned)view.position_count);
+    printf("collision_indices=%u\n", (unsigned)view.index_count);
+    printf("collision_triangles=%u\n", (unsigned)(view.index_count / 3));
+    printf("collision_bounds_min=%.6f,%.6f,%.6f\n",
+           view.bounds.min.x, view.bounds.min.y, view.bounds.min.z);
+    printf("collision_bounds_max=%.6f,%.6f,%.6f\n",
+           view.bounds.max.x, view.bounds.max.y, view.bounds.max.z);
+    return 0;
+}
+
+static int cmd_m2info(HANDLE archive, const char *file_path) {
+    LPBYTE data = NULL;
+    DWORD size = 0;
+    char archive_path[512];
+    int result;
+
+    if (!read_archive_file(archive, file_path, &data, &size) &&
+        (!WowM2_ArchivePath(file_path, archive_path, sizeof(archive_path)) ||
+         !read_archive_file(archive, archive_path, &data, &size))) {
+        fprintf(stderr, "Cannot read MPQ file: %s\n", file_path);
+        return 1;
+    }
+    result = print_m2info(file_path, data, size);
+    free(data);
+    return result;
 }
 
 static const char *mpq_strcasestr(const char *hay, const char *needle) {
@@ -926,6 +976,18 @@ static HANDLE data_archives[DATA_MAX_ARCHIVES];
 static char   data_archive_paths[DATA_MAX_ARCHIVES][512];
 static int    data_archive_count;
 
+typedef struct {
+    LPBYTE data;
+    DWORD size;
+    int archive_index;
+} data_read_result_t;
+
+typedef struct {
+    char path[512];
+    DWORD instances;
+    WOWDOODADDEF first;
+} doodad_summary_t;
+
 static void data_collect_archive(LPCSTR path, void *ud) {
     (void)ud;
     if (data_archive_count >= DATA_MAX_ARCHIVES) return;
@@ -961,6 +1023,25 @@ static void data_close_archives(void) {
             data_archives[i] = NULL;
         }
     }
+}
+
+static bool data_read_highest(const char *path, data_read_result_t *result) {
+    memset(result, 0, sizeof(*result));
+    result->archive_index = -1;
+    for (int i = data_archive_count - 1; i >= 0; i--)
+        if (data_archives[i] && read_archive_file(data_archives[i], path, &result->data, &result->size)) {
+            result->archive_index = i;
+            return true;
+        }
+    return false;
+}
+
+static bool data_read_m2(const char *path, data_read_result_t *result) {
+    char archive_path[512];
+
+    return data_read_highest(path, result) ||
+        (WowM2_ArchivePath(path, archive_path, sizeof(archive_path)) &&
+         data_read_highest(archive_path, result));
 }
 
 /* grep one archive, tagging each match with the archive path. */
@@ -1080,6 +1161,131 @@ static int cmd_cat_data(const char *file_path) {
     return 0;
 }
 
+/* Data mode matches engine override order by inspecting only the highest-priority archive containing the M2. */
+static int cmd_m2info_data(const char *file_path) {
+    char path[512];
+    data_read_result_t file;
+    int result;
+
+    strncpy(path, file_path, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    Tool_NormalizeSlashes(path, '\\');
+    Tool_TrimEdgeSlashes(path);
+    if (!data_read_m2(path, &file)) {
+        fprintf(stderr, "Cannot find file in any archive: %s\n", path);
+        return 1;
+    }
+    fprintf(stderr, "--- %s ---\n", data_archive_paths[file.archive_index]);
+    result = print_m2info(path, file.data, file.size);
+    free(file.data);
+    return result;
+}
+
+/* One report proves ADT placement, model reuse, and dedicated collision status from engine-priority data. */
+static int cmd_doodadinfo_data(const char *file_path) {
+    char path[512];
+    data_read_result_t adt_file;
+    WOWADTOBJECTVIEW adt;
+    doodad_summary_t *summaries = NULL;
+    DWORD summary_count = 0, filedata_count = 0, invalid_count = 0;
+    DWORD solid_models = 0, decoration_models = 0, malformed_models = 0;
+
+    strncpy(path, file_path, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    Tool_NormalizeSlashes(path, '\\');
+    Tool_TrimEdgeSlashes(path);
+    if (!data_read_highest(path, &adt_file)) {
+        fprintf(stderr, "Cannot find file in any archive: %s\n", path);
+        return 1;
+    }
+    if (!WowAdt_ParseObjects(adt_file.data, adt_file.size, &adt)) {
+        fprintf(stderr, "Malformed ADT object chunks: %s\n", path);
+        free(adt_file.data);
+        return 1;
+    }
+    FOR_LOOP(i, adt.doodad_definition_count) {
+        LPCWOWDOODADDEF definition = adt.doodad_definitions + i;
+        WOWWMOREFERENCE reference = {
+            .blob = adt.doodad_names, .blob_size = adt.doodad_names_size,
+            .offsets = adt.doodad_name_offsets, .offset_count = adt.doodad_name_offset_count,
+            .index = definition->name_id,
+        };
+        LPCSTR model_path;
+        DWORD summary;
+
+        if (definition->flags & 0x40) {
+            filedata_count++;
+            continue;
+        }
+        model_path = WowWmo_StringRef(&reference);
+        if (!model_path) {
+            invalid_count++;
+            continue;
+        }
+        for (summary = 0; summary < summary_count; summary++)
+            if (!strcasecmp(summaries[summary].path, model_path)) break;
+        if (summary == summary_count) {
+            doodad_summary_t *next = realloc(summaries, sizeof(*summaries) * (summary_count + 1));
+
+            if (!next) {
+                fprintf(stderr, "Out of memory\n");
+                free(summaries);
+                free(adt_file.data);
+                return 1;
+            }
+            summaries = next;
+            memset(summaries + summary_count, 0, sizeof(*summaries));
+            snprintf(summaries[summary_count].path, sizeof(summaries[summary_count].path), "%s", model_path);
+            summaries[summary_count].first = *definition;
+            summary_count++;
+        }
+        summaries[summary].instances++;
+    }
+    printf("adt=%s\narchive=%s\nplacements=%u\nmodels=%u\nfiledata=%u\ninvalid=%u\n",
+           path, data_archive_paths[adt_file.archive_index], (unsigned)adt.doodad_definition_count,
+           (unsigned)summary_count, (unsigned)filedata_count, (unsigned)invalid_count);
+    FOR_LOOP(i, summary_count) {
+        doodad_summary_t const *summary = summaries + i;
+        data_read_result_t model_file;
+        WOWM2COLLISIONVIEW collision;
+        wowM2CollisionStatus_t status = WOW_M2_COLLISION_MALFORMED;
+        VECTOR3 origin = WowWmo_ObjectPoint(&summary->first.position);
+        LPCSTR status_name;
+
+        if (data_read_m2(summary->path, &model_file))
+            status = WowM2_ParseCollision(model_file.data, model_file.size, &collision);
+        status_name = status == WOW_M2_COLLISION_VALID ? "solid" :
+            status == WOW_M2_COLLISION_NONE ? "decoration" : "malformed";
+        solid_models += status == WOW_M2_COLLISION_VALID;
+        decoration_models += status == WOW_M2_COLLISION_NONE;
+        malformed_models += status == WOW_M2_COLLISION_MALFORMED;
+        printf("model=%s instances=%u collision=%s first=%.3f,%.3f,%.3f "
+               "rotation=%.3f,%.3f,%.3f scale=%.6f",
+               summary->path, (unsigned)summary->instances, status_name,
+               origin.x, origin.y, origin.z,
+               summary->first.rotation.x, summary->first.rotation.y, summary->first.rotation.z,
+               summary->first.scale / 1024.0f);
+        if (status == WOW_M2_COLLISION_VALID) {
+            MATRIX4 matrix;
+            WOWBOX bounds;
+
+            WowM2_DoodadMatrix(&summary->first, &matrix);
+            bounds = WowWmo_TransformBox(&collision.bounds, &matrix);
+            printf(" vertices=%u triangles=%u bounds=%.3f,%.3f,%.3f:%.3f,%.3f,%.3f",
+                   (unsigned)collision.position_count, (unsigned)(collision.index_count / 3),
+                   bounds.min.x, bounds.min.y, bounds.min.z,
+                   bounds.max.x, bounds.max.y, bounds.max.z);
+        }
+        printf("\n");
+        free(model_file.data);
+    }
+    printf("solid_models=%u\ndecoration_models=%u\nmalformed_models=%u\n",
+           (unsigned)solid_models, (unsigned)decoration_models, (unsigned)malformed_models);
+    free(summaries);
+    free(adt_file.data);
+    return malformed_models || invalid_count ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     const char *mpq = NULL;
     const char *data = NULL;
@@ -1148,8 +1354,14 @@ int main(int argc, char **argv) {
         } else if (strcmp(cmd, "cat") == 0) {
             if (!arg) { usage(); data_close_archives(); return 1; }
             rc = cmd_cat_data(arg);
+        } else if (strcmp(cmd, "m2info") == 0) {
+            if (!arg) { usage(); data_close_archives(); return 1; }
+            rc = cmd_m2info_data(arg);
+        } else if (strcmp(cmd, "doodadinfo") == 0) {
+            if (!arg) { usage(); data_close_archives(); return 1; }
+            rc = cmd_doodadinfo_data(arg);
         } else {
-            fprintf(stderr, "With -data only grep and cat are supported\n");
+            fprintf(stderr, "With -data only grep, cat, m2info, and doodadinfo are supported\n");
             rc = 1;
         }
         data_close_archives();
@@ -1224,6 +1436,18 @@ int main(int argc, char **argv) {
         Tool_NormalizeSlashes(path, '\\');
         Tool_TrimEdgeSlashes(path);
         rc = cmd_imginfo(archive, path);
+    } else if (strcmp(cmd, "m2info") == 0) {
+        char path[512];
+        if (!arg) {
+            usage();
+            SFileCloseArchive(archive);
+            return 1;
+        }
+        strncpy(path, arg, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+        Tool_NormalizeSlashes(path, '\\');
+        Tool_TrimEdgeSlashes(path);
+        rc = cmd_m2info(archive, path);
     } else {
         usage();
         rc = 1;

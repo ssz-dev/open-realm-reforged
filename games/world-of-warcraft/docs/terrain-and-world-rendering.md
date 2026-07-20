@@ -79,11 +79,42 @@ gameplay queries. It loads `MCVT` height samples from `MCNK` chunks and resolves
 point height by splitting a local cell around the center sample into triangles,
 then using barycentric interpolation.
 
-The same ADT read feeds `MWMO`/`MWID`/`MODF` into the gameplay WMO cache.
+The same ADT read feeds `MWMO`/`MWID`/`MODF` into the gameplay WMO cache and
+`MMDX`/`MMID`/`MDDF` into the verified doodad cache. Renderer, gameplay, and
+diagnostics use the single `WowAdt_ParseObjects` view, so placement lookup
+cannot drift between subsystems.
 `CM_WowQueryGround` resolves terrain, indoor floors, stacked floors, ramps, and
 roofs as competing candidates. `CM_WowSweepWorld` performs swept
 capsule-shaped obstacle queries with instance/group bounds as broadphase and
-`MOBN`/`MOBR` triangle geometry as narrowphase.
+`MOBN`/`MOBR` triangle geometry as WMO narrowphase.
+
+### Verified Doodad Collision
+
+An ADT doodad is solid only when its M2 contains complete, bounded
+`collision_indices` and `collision_positions` arrays. Render bounds, filenames,
+and guessed MDDF flags never select collision. M2s without those dedicated
+arrays are explicitly cached as decoration; malformed collision arrays are
+logged and rejected.
+
+Classic ADTs may reference a model as `.mdx` while `model.MPQ` stores the
+payload as `.m2`. Collision uses the same verified extension resolution as the
+renderer. `wow_m2_format.h` centralizes raw/wrapped M2 payload lookup, classic
+and modern header offsets, overflow-safe arrays, collision validation, and the
+exact non-ground instance transform.
+
+Each active ADT tile owns:
+
+- one reference to each distinct M2 collision model used by that tile,
+- transformed bounds per solid instance,
+- one center-bucket reference per instance across the native 16x16 chunk grid,
+- the largest horizontal instance extent used to expand query chunk ranges.
+
+The exact instance AABB rejects false candidates before the existing analytic
+sphere/triangle sweep. The mesh is shared across repeated instances and freed
+when the last active tile reference leaves the nine-tile LRU. Sweeps allocate
+nothing. Movement, creature navigation, LOS, melee validation, Throw,
+projectiles, and camera mode all receive `WOW_SURFACE_DOODAD` through the
+existing `CM_WowSweepWorld` path.
 
 ### World-query profiler
 
@@ -96,16 +127,17 @@ world_profile_reset
 world_profile
 ```
 
-The summary reports terrain LRU behavior, ground and sweep volume, WMO
-broadphase/narrowphase work, LOS, projectile wall hits, and obstacle-navigation
-fallbacks. The first non-empty summary captures observed candidate, triangle,
-and cache-miss baselines; later summaries warn only when an interval exceeds
-that observed workload. `world_profile_reset` clears every counter and peak but
-retains this baseline for interval comparison. Warnings are summary-only and
-never alter gameplay. `wow_world_profile 0` disables collection while leaving
-all query results unchanged. The shared query layer has no stable sub-frame
-timer; the server clock advances per frame, so this profiler deliberately
-records work counts rather than misleading per-query durations.
+The summary reports terrain LRU behavior, ground and sweep volume, WMO and
+doodad broadphase/narrowphase work, LOS, projectile wall hits, and
+obstacle-navigation fallbacks. The first non-empty summary captures observed
+candidate, triangle, and cache-miss baselines; later summaries warn only when
+an interval exceeds that observed workload. `world_profile_reset` clears every
+counter and peak but retains this baseline for interval comparison. Warnings
+are summary-only and never alter gameplay. `wow_world_profile 0` disables
+collection while leaving all query results unchanged. The shared query layer
+has no stable sub-frame timer; the server clock advances per frame, so this
+profiler deliberately records work counts rather than misleading per-query
+durations.
 
 ### Camera Collision
 
@@ -137,16 +169,15 @@ ADT object rendering remains renderer-owned:
 - Doodads are bucketed for draw-distance culling.
 - Missing doodad/WMO models are counted and can be represented by debug marker geometry when debug flags are enabled.
 
-The renderer and gameplay collision share WMO chunk interpretation through
-`games/world-of-warcraft/common/wow_wmo_format.h`; gameplay does not depend on
-renderer runtime objects. Game entities are not spawned for every ADT doodad.
-Small and decorative M2 doodads remain non-solid until verified collision
-geometry or collidable flags can select only relevant static obstacles.
+The renderer, gameplay collision, and diagnostics share ADT object and WMO
+chunk interpretation through `games/world-of-warcraft/common/`; gameplay does
+not depend on renderer runtime objects. Game entities are not spawned for every
+ADT doodad. Decorative M2 doodads stay non-solid by data contract.
 
 ## Current Limits
 
 - Terrain rendering is the core focus.
-- WMO rendering/collision is present; portals, doodad collision, lighting,
+- WMO and verified static doodad collision are present; portals, lighting,
   particles, water, and animation fidelity are incomplete.
 - The draw window and asset compatibility are tuned around local classic-era data.
 - Production support for arbitrary WoW client versions is not present.

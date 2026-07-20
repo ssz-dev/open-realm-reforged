@@ -2,6 +2,7 @@
 #define WOW_WMO_FORMAT_H
 
 #include "common/shared.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -37,6 +38,25 @@ typedef struct {
 } WOWMAPOBJDEF;
 typedef WOWMAPOBJDEF *LPWOWMAPOBJDEF;
 typedef WOWMAPOBJDEF const *LPCWOWMAPOBJDEF;
+
+typedef struct {
+    LPCSTR doodad_names;
+    DWORD doodad_names_size;
+    DWORD const *doodad_name_offsets;
+    DWORD doodad_name_offset_count;
+    LPCWOWDOODADDEF doodad_definitions;
+    DWORD doodad_definition_count;
+    LPCSTR wmo_names;
+    DWORD wmo_names_size;
+    DWORD const *wmo_name_offsets;
+    DWORD wmo_name_offset_count;
+    LPCWOWMAPOBJDEF wmo_definitions;
+    DWORD wmo_definition_count;
+    VECTOR2 tile_max;
+    BOOL tile_grid_valid;
+} WOWADTOBJECTVIEW;
+typedef WOWADTOBJECTVIEW *LPWOWADTOBJECTVIEW;
+typedef WOWADTOBJECTVIEW const *LPCWOWADTOBJECTVIEW;
 
 typedef struct { BYTE flags, material_id; } WOWWMOPOLY;
 typedef WOWWMOPOLY *LPWOWWMOPOLY;
@@ -124,6 +144,63 @@ static LPCSTR WowWmo_StringAt(LPCSTR blob, DWORD size, DWORD offset) {
 static LPCSTR WowWmo_StringRef(LPCWOWWMOREFERENCE ref) {
     return ref->offsets && ref->index < ref->offset_count
         ? WowWmo_StringAt(ref->blob, ref->blob_size, ref->offsets[ref->index]) : NULL;
+}
+
+/* Renderer, collision, and diagnostics share one validated ADT object-placement view. */
+static BOOL WowAdt_ParseObjects(BYTE const *data, DWORD size, LPWOWADTOBJECTVIEW view) {
+    DWORD offset = 0;
+
+    if (!data || !view) return false;
+    *view = (WOWADTOBJECTVIEW){ 0 };
+    while (offset + 8 <= size) {
+        BYTE const *tag = data + offset;
+        DWORD chunk_size = WowWmo_Read32(data + offset + 4);
+        BYTE const *chunk;
+
+        offset += 8;
+        if (chunk_size > size - offset) return false;
+        chunk = data + offset;
+        if (WowWmo_TagEquals(tag, "KNCM") && chunk_size >= 0x74) {
+            DWORD col = WowWmo_Read32(chunk + 4), row = WowWmo_Read32(chunk + 8);
+            WOWVEC3 position;
+            VECTOR2 tile_max;
+
+            memcpy(&position, chunk + 0x68, sizeof(position));
+            tile_max = (VECTOR2){
+                position.x + (FLOAT)row * (WOW_WMO_ADT_SIZE / 16.0f),
+                position.y + (FLOAT)col * (WOW_WMO_ADT_SIZE / 16.0f),
+            };
+            if (col < 16 && row < 16 && !view->tile_grid_valid) {
+                view->tile_max = tile_max;
+                view->tile_grid_valid = true;
+            } else if (col < 16 && row < 16 &&
+                       (fabsf(view->tile_max.x - tile_max.x) > 0.1f ||
+                        fabsf(view->tile_max.y - tile_max.y) > 0.1f))
+                return false;
+        } else if (WowWmo_TagEquals(tag, "XDMM"))
+            view->doodad_names = (LPCSTR)chunk, view->doodad_names_size = chunk_size;
+        else if (WowWmo_TagEquals(tag, "DIMM")) {
+            if (chunk_size % sizeof(DWORD)) return false;
+            view->doodad_name_offsets = (DWORD const *)chunk;
+            view->doodad_name_offset_count = chunk_size / sizeof(DWORD);
+        } else if (WowWmo_TagEquals(tag, "FDDM")) {
+            if (chunk_size % sizeof(WOWDOODADDEF)) return false;
+            view->doodad_definitions = (LPCWOWDOODADDEF)chunk;
+            view->doodad_definition_count = chunk_size / sizeof(WOWDOODADDEF);
+        } else if (WowWmo_TagEquals(tag, "OMWM"))
+            view->wmo_names = (LPCSTR)chunk, view->wmo_names_size = chunk_size;
+        else if (WowWmo_TagEquals(tag, "DIWM")) {
+            if (chunk_size % sizeof(DWORD)) return false;
+            view->wmo_name_offsets = (DWORD const *)chunk;
+            view->wmo_name_offset_count = chunk_size / sizeof(DWORD);
+        } else if (WowWmo_TagEquals(tag, "FDOM")) {
+            if (chunk_size % sizeof(WOWMAPOBJDEF)) return false;
+            view->wmo_definitions = (LPCWOWMAPOBJDEF)chunk;
+            view->wmo_definition_count = chunk_size / sizeof(WOWMAPOBJDEF);
+        }
+        offset += chunk_size;
+    }
+    return offset == size;
 }
 
 static void WowWmo_GroupPath(LPCWOWWMOGROUPPATH path) {
@@ -218,6 +295,27 @@ static BOOL WowWmo_ParseGroup(BYTE const *data, DWORD size, LPWOWWMOGROUPVIEW vi
 
 static VECTOR3 WowWmo_ObjectPoint(LPCWOWVEC3 p) {
     return (VECTOR3){ WOW_WMO_WORLD_OFFSET - p->z, WOW_WMO_WORLD_OFFSET - p->x, p->y };
+}
+
+static WOWBOX WowWmo_TransformBox(LPCWOWBOX source, LPCMATRIX4 matrix) {
+    WOWBOX out = {
+        .min = { INFINITY, INFINITY, INFINITY },
+        .max = { -INFINITY, -INFINITY, -INFINITY },
+    };
+
+    FOR_LOOP(i, 8) {
+        VECTOR3 point = {
+            (i & 1) ? source->max.x : source->min.x,
+            (i & 2) ? source->max.y : source->min.y,
+            (i & 4) ? source->max.z : source->min.z,
+        };
+
+        point = Matrix4_multiply_vector3(matrix, &point);
+        out.min.x = MIN(out.min.x, point.x); out.max.x = MAX(out.max.x, point.x);
+        out.min.y = MIN(out.min.y, point.y); out.max.y = MAX(out.max.y, point.y);
+        out.min.z = MIN(out.min.z, point.z); out.max.z = MAX(out.max.z, point.z);
+    }
+    return out;
 }
 
 /* The shared transform exactly matches ADT MODF rendering, including classic fixed-point scale. */

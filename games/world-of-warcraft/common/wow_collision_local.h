@@ -2,6 +2,7 @@
 #define WOW_COLLISION_LOCAL_H
 
 #include "common/wow_world_query.h"
+#include "common/wow_m2_format.h"
 #include "common/wow_wmo_format.h"
 
 typedef struct { VECTOR3 a, b, c; } CMWOWTRIANGLE;
@@ -47,9 +48,40 @@ typedef struct {
 typedef CMWOWCOLLISIONINSTANCE *LPCMWOWCOLLISIONINSTANCE;
 typedef CMWOWCOLLISIONINSTANCE const *LPCCMWOWCOLLISIONINSTANCE;
 
+typedef struct CMWOWDOODADMODEL_s {
+    PATHSTR path;
+    LPVECTOR3 vertices;
+    WORD *indices;
+    DWORD vertex_count;
+    DWORD index_count;
+    DWORD references;
+    WOWBOX bounds;
+    wowM2CollisionStatus_t status;
+    struct CMWOWDOODADMODEL_s *next;
+} CMWOWDOODADMODEL;
+typedef CMWOWDOODADMODEL *LPCMWOWDOODADMODEL;
+typedef CMWOWDOODADMODEL const *LPCCMWOWDOODADMODEL;
+
+typedef struct {
+    LPCMWOWDOODADMODEL model;
+    MATRIX4 matrix;
+    WOWBOX bounds;
+} CMWOWDOODADINSTANCE;
+typedef CMWOWDOODADINSTANCE *LPCMWOWDOODADINSTANCE;
+typedef CMWOWDOODADINSTANCE const *LPCCMWOWDOODADINSTANCE;
+
 typedef struct {
     LPCMWOWCOLLISIONINSTANCE instances;
     DWORD instance_count;
+    LPCMWOWDOODADMODEL *doodad_models;
+    DWORD doodad_model_count;
+    LPCMWOWDOODADINSTANCE doodad_instances;
+    DWORD doodad_instance_count;
+    DWORD doodad_chunk_offsets[257];
+    LPDWORD doodad_chunk_refs;
+    VECTOR2 doodad_tile_max;
+    VECTOR2 doodad_max_extent;
+    BOOL doodad_grid_valid;
 } CMWOWCOLLISIONTILE;
 typedef CMWOWCOLLISIONTILE *LPCMWOWCOLLISIONTILE;
 typedef CMWOWCOLLISIONTILE const *LPCCMWOWCOLLISIONTILE;

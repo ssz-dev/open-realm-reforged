@@ -1,21 +1,17 @@
 #include "r_wowmap.h"
 
 void Wow_LoadAdt(BYTE const *data, DWORD size, DWORD tile_x, DWORD tile_y) {
+    WOWADTOBJECTVIEW objects;
     DWORD offset = 0;
     char **textures = NULL;
     DWORD num_textures = 0;
     VERTEX *object_vertices = NULL;
     DWORD object_vertex_count = 0;
-#if !WOW_DEBUG_DOODAD_ERROR_MESHES
-    BYTE const *doodad_names = NULL;
-    DWORD doodad_names_size = 0;
-    DWORD const *doodad_offsets = NULL;
-    DWORD doodad_offset_count = 0;
-#endif
-    BYTE const *wmo_names = NULL;
-    DWORD wmo_names_size = 0;
-    DWORD const *wmo_offsets = NULL;
-    DWORD wmo_offset_count = 0;
+
+    if (!WowAdt_ParseObjects(data, size, &objects)) {
+        fprintf(stderr, "OpenWoW renderer: malformed ADT object chunks\n");
+        return;
+    }
 
     while (offset + 8 <= size) {
         BYTE const *tag = data + offset;
@@ -30,64 +26,6 @@ void Wow_LoadAdt(BYTE const *data, DWORD size, DWORD tile_x, DWORD tile_y) {
         if (Wow_TagEquals(tag, "XETM")) {
             Wow_FreeStringList(textures, num_textures);
             textures = Wow_ParseStringBlock(chunk, chunk_size, &num_textures);
-        } else if (Wow_TagEquals(tag, "XDMM")) {
-#if !WOW_DEBUG_DOODAD_ERROR_MESHES
-            doodad_names = chunk;
-            doodad_names_size = chunk_size;
-#endif
-        } else if (Wow_TagEquals(tag, "DIMM")) {
-#if !WOW_DEBUG_DOODAD_ERROR_MESHES
-            doodad_offsets = (DWORD const *)chunk;
-            doodad_offset_count = chunk_size / sizeof(DWORD);
-#endif
-        } else if (Wow_TagEquals(tag, "OMWM")) {
-            wmo_names = chunk;
-            wmo_names_size = chunk_size;
-        } else if (Wow_TagEquals(tag, "DIWM")) {
-            wmo_offsets = (DWORD const *)chunk;
-            wmo_offset_count = chunk_size / sizeof(DWORD);
-        } else if (Wow_TagEquals(tag, "FDDM")) {
-            DWORD count = chunk_size / sizeof(wowDoodadDef_t);
-            wow_world.num_doodads += count;
-#if WOW_DEBUG_DOODAD_ERROR_MESHES
-            object_vertices = Wow_AppendDoodadErrorMarkers(object_vertices,
-                                                           &object_vertex_count,
-                                                           chunk,
-                                                           chunk_size);
-#else
-            FOR_LOOP(i, count) {
-                wowDoodadDef_t const *def = (wowDoodadDef_t const *)(chunk + i * sizeof(*def));
-                LPCSTR model_path = Wow_StringRefFromOffsets(doodad_names,
-                                                              doodad_names_size,
-                                                              doodad_offsets,
-                                                              doodad_offset_count,
-                                                              def->name_id);
-                Wow_AddDoodadInstance(model_path, def);
-            }
-#endif
-        } else if (Wow_TagEquals(tag, "FDOM")) {
-#if WOW_DEBUG_OBJECT_MARKERS
-            object_vertices = Wow_AppendMarkers(object_vertices,
-                                                &object_vertex_count,
-                                                chunk,
-                                                chunk_size,
-                                                wmo_names,
-                                                wmo_names_size,
-                                                wmo_offsets,
-                                                wmo_offset_count,
-                                                true);
-#else
-            DWORD count = chunk_size / sizeof(wowMapObjDef_t);
-            FOR_LOOP(i, count) {
-                wowMapObjDef_t const *def = (wowMapObjDef_t const *)(chunk + i * sizeof(*def));
-                LPCSTR wmo_path = Wow_StringRefFromOffsets(wmo_names,
-                                                           wmo_names_size,
-                                                           wmo_offsets,
-                                                           wmo_offset_count,
-                                                           def->name_id);
-                Wow_AddWmoInstance(wmo_path, def);
-            }
-#endif
         } else if (Wow_TagEquals(tag, "KNCM") && chunk_size >= 0x80) {
             DWORD sub = 0x80;
             wowVec3_t pos;
@@ -158,6 +96,40 @@ void Wow_LoadAdt(BYTE const *data, DWORD size, DWORD tile_x, DWORD tile_y) {
         offset += chunk_size;
     }
 
+    wow_world.num_doodads += objects.doodad_definition_count;
+#if WOW_DEBUG_DOODAD_ERROR_MESHES
+    object_vertices = Wow_AppendDoodadErrorMarkers(object_vertices, &object_vertex_count,
+                                                   objects.doodad_definitions,
+                                                   objects.doodad_definition_count *
+                                                       sizeof(*objects.doodad_definitions));
+#else
+    FOR_LOOP(i, objects.doodad_definition_count) {
+        wowDoodadDef_t const *def = objects.doodad_definitions + i;
+        LPCSTR model_path = Wow_StringRefFromOffsets((BYTE const *)objects.doodad_names,
+                                                     objects.doodad_names_size,
+                                                     objects.doodad_name_offsets,
+                                                     objects.doodad_name_offset_count,
+                                                     def->name_id);
+        Wow_AddDoodadInstance(model_path, def);
+    }
+#endif
+#if WOW_DEBUG_OBJECT_MARKERS
+    object_vertices = Wow_AppendMarkers(object_vertices, &object_vertex_count,
+                                        objects.wmo_definitions,
+                                        objects.wmo_definition_count * sizeof(*objects.wmo_definitions),
+                                        objects.wmo_names, objects.wmo_names_size,
+                                        objects.wmo_name_offsets, objects.wmo_name_offset_count, true);
+#else
+    FOR_LOOP(i, objects.wmo_definition_count) {
+        wowMapObjDef_t const *def = objects.wmo_definitions + i;
+        LPCSTR wmo_path = Wow_StringRefFromOffsets((BYTE const *)objects.wmo_names,
+                                                   objects.wmo_names_size,
+                                                   objects.wmo_name_offsets,
+                                                   objects.wmo_name_offset_count,
+                                                   def->name_id);
+        Wow_AddWmoInstance(wmo_path, def);
+    }
+#endif
     if (object_vertex_count) {
         wowAdtChunk_t *marker_chunk = ri.MemAlloc(sizeof(*marker_chunk));
         memset(marker_chunk, 0, sizeof(*marker_chunk));

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "game/g_wow_local.h"
+#include "common/wow_m2_format.h"
 #include "common/wow_wmo_format.h"
 
 int _tests_run = 0;
@@ -39,8 +40,11 @@ static DWORD test_mem_alloc_calls;
 static DWORD test_adt_reads;
 static DWORD test_wmo_root_reads;
 static DWORD test_wmo_group_reads;
+static DWORD test_doodad_solid_reads;
+static DWORD test_doodad_grass_reads;
 static BOOL test_wmo_fixture_enabled;
 static BOOL test_wmo_bsp_enabled;
+static BOOL test_doodad_fixture_enabled;
 static BOOL test_world_profile_enabled;
 static char test_last_error[512];
 static char test_save_path[MAX_PATHLEN];
@@ -48,6 +52,10 @@ static char test_save_path[MAX_PATHLEN];
 #define TEST_PROGRESS_PATH "build/tests/openwow-progress-test.sav"
 #define TEST_WMO_ROOT "World\\Test\\Physics.wmo"
 #define TEST_WMO_GROUP "World\\Test\\Physics_000.wmo"
+#define TEST_DOODAD_SOLID "World\\Test\\SolidTree.mdx"
+#define TEST_DOODAD_GRASS "World\\Test\\Grass.mdx"
+#define TEST_DOODAD_SOLID_ARCHIVE "World\\Test\\SolidTree.m2"
+#define TEST_DOODAD_GRASS_ARCHIVE "World\\Test\\Grass.m2"
 
 /* ---- configstring stubs (game_import.configstring / GetConfigstring) ---- */
 #define TEST_CONFIGSTRINGS 128
@@ -344,6 +352,48 @@ static HANDLE make_test_wmo_group(LPDWORD size_out) {
     return data;
 }
 
+static HANDLE make_test_doodad_m2(BOOL solid, LPDWORD size_out) {
+    static VECTOR3 const vertices[] = {
+        { -0.5f, 0.0f, -2.0f }, { 0.5f, 0.0f, -2.0f },
+        { 0.5f, 6.0f, -2.0f }, { -0.5f, 6.0f, -2.0f },
+        { -0.5f, 0.0f, 2.0f }, { 0.5f, 0.0f, 2.0f },
+        { 0.5f, 6.0f, 2.0f }, { -0.5f, 6.0f, 2.0f },
+    };
+    static WORD const indices[] = {
+        0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7,
+        0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
+        0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2,
+    };
+    WOWM2HEADERLEGACY header = { .magic = ID_MD20, .version = 260 };
+    DWORD normal_count = sizeof(indices) / sizeof(indices[0]) / 3;
+    DWORD size = sizeof(header) +
+        (solid ? sizeof(indices) + sizeof(vertices) + normal_count * sizeof(VECTOR3) : 0);
+    LPBYTE data = calloc(1, size);
+
+    ASSERT_NOT_NULL(data);
+    if (!data) return NULL;
+    if (solid) {
+        header.collision_indices = (WOWM2ARRAY){ sizeof(indices) / sizeof(indices[0]), sizeof(header) };
+        header.collision_positions = (WOWM2ARRAY){
+            sizeof(vertices) / sizeof(vertices[0]), sizeof(header) + sizeof(indices),
+        };
+        header.collision_normals = (WOWM2ARRAY){
+            normal_count, sizeof(header) + sizeof(indices) + sizeof(vertices),
+        };
+    }
+    memcpy(data, &header, sizeof(header));
+    if (solid) {
+        memcpy(data + header.collision_indices.offset, indices, sizeof(indices));
+        memcpy(data + header.collision_positions.offset, vertices, sizeof(vertices));
+    }
+    *size_out = size;
+    return data;
+}
+
+static WOWVEC3 test_object_position(FLOAT world_x, FLOAT world_y, FLOAT world_z) {
+    return (WOWVEC3){ WOW_WMO_WORLD_OFFSET - world_y, world_z, WOW_WMO_WORLD_OFFSET - world_x };
+}
+
 /* A complete artificial flat ADT makes every game-path query deterministic without real WoW data. */
 static HANDLE make_area_adt(int tile_x, int tile_y, LPDWORD size_out) {
     enum { MCVT_SIZE = 145 * sizeof(FLOAT), MCNK_SIZE = 0x80 + 8 + MCVT_SIZE };
@@ -387,6 +437,32 @@ static HANDLE make_area_adt(int tile_x, int tile_y, LPDWORD size_out) {
         data = append_chunk(&(TESTCHUNK){ data, &size, "OMWM", name, (DWORD)strlen(name) + 1 });
         data = append_chunk(&(TESTCHUNK){ data, &size, "DIWM", &name_offset, sizeof(name_offset) });
         data = append_chunk(&(TESTCHUNK){ data, &size, "FDOM", &definition, sizeof(definition) });
+    }
+    if (test_doodad_fixture_enabled && tile_x == 31 && tile_y == 31) {
+        char names[] = TEST_DOODAD_SOLID "\0" TEST_DOODAD_GRASS;
+        DWORD offsets[] = { 0, sizeof(TEST_DOODAD_SOLID) };
+        WOWDOODADDEF definitions[] = {
+            {
+                .name_id = 0, .position = test_object_position(110.0f, 190.0f, 20.0f),
+                .rotation = { 0.0f, 90.0f, 90.0f }, .scale = 1024,
+            },
+            {
+                .name_id = 1, .position = test_object_position(120.0f, 200.0f, 20.0f),
+                .rotation = { 0.0f, 90.0f, 90.0f }, .scale = 1024,
+            },
+            {
+                .name_id = 0, .position = test_object_position(130.0f, 210.0f, 20.0f),
+                .rotation = { 0.0f, 90.0f, 180.0f }, .scale = 1024,
+            },
+            {
+                .name_id = 0, .position = test_object_position(140.0f, 190.0f, 20.0f),
+                .rotation = { 0.0f, 90.0f, 90.0f }, .scale = 2048,
+            },
+        };
+
+        data = append_chunk(&(TESTCHUNK){ data, &size, "XDMM", names, sizeof(names) });
+        data = append_chunk(&(TESTCHUNK){ data, &size, "DIMM", offsets, sizeof(offsets) });
+        data = append_chunk(&(TESTCHUNK){ data, &size, "FDDM", definitions, sizeof(definitions) });
     }
     *size_out = size;
     return data;
@@ -443,6 +519,14 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
     if (test_wmo_fixture_enabled && path_eq(filename, TEST_WMO_GROUP)) {
         test_wmo_group_reads++;
         return make_test_wmo_group(size);
+    }
+    if (test_doodad_fixture_enabled && path_eq(filename, TEST_DOODAD_SOLID_ARCHIVE)) {
+        test_doodad_solid_reads++;
+        return make_test_doodad_m2(true, size);
+    }
+    if (test_doodad_fixture_enabled && path_eq(filename, TEST_DOODAD_GRASS_ARCHIVE)) {
+        test_doodad_grass_reads++;
+        return make_test_doodad_m2(false, size);
     }
     if (parse_area_adt_path(filename, &tile_x, &tile_y)) {
         test_adt_reads++;
@@ -701,8 +785,11 @@ static void reset_test_state(void) {
     test_adt_reads = 0;
     test_wmo_root_reads = 0;
     test_wmo_group_reads = 0;
+    test_doodad_solid_reads = 0;
+    test_doodad_grass_reads = 0;
     test_wmo_fixture_enabled = false;
     test_wmo_bsp_enabled = false;
+    test_doodad_fixture_enabled = false;
     test_world_profile_enabled = false;
     memset(test_last_error, 0, sizeof(test_last_error));
     memset(test_configstrings, 0, sizeof(test_configstrings));
@@ -1232,6 +1319,197 @@ static void test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp(void) {
     ASSERT(CM_WowSweepWorld(&sweep, &trace));
     ASSERT(trace.fraction > 0.4f && trace.fraction < 0.5f);
     ASSERT_EQ_INT((int)test_wmo_group_reads, 1);
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Versioned M2 headers distinguish dedicated collision geometry from decoration without render bounds. */
+static void test_wow_m2_collision_contract_validates_legacy_mesh_and_decoration(void) {
+    WOWM2COLLISIONVIEW view;
+    wowM2CollisionStatus_t status;
+    LPBYTE solid, grass, wrapped;
+    DWORD solid_size, grass_size;
+    LPCWOWM2HEADERLEGACY header;
+
+    solid = make_test_doodad_m2(true, &solid_size);
+    grass = make_test_doodad_m2(false, &grass_size);
+    status = WowM2_ParseCollision(solid, solid_size, &view);
+    ASSERT_EQ_INT((int)status, WOW_M2_COLLISION_VALID);
+    ASSERT_EQ_INT((int)view.version, 260);
+    ASSERT_EQ_INT((int)view.position_count, 8);
+    ASSERT_EQ_INT((int)view.index_count, 36);
+    ASSERT_EQ_INT((int)view.normal_count, 12);
+    ASSERT_EQ_FLOAT(view.bounds.min.x, -0.5f, 0.001f);
+    ASSERT_EQ_FLOAT(view.bounds.max.z, 2.0f, 0.001f);
+    ASSERT_EQ_INT((int)WowM2_ParseCollision(grass, grass_size, &view), WOW_M2_COLLISION_NONE);
+    ASSERT_EQ_INT((int)view.version, 260);
+
+    wrapped = calloc(1, solid_size + 8);
+    ASSERT_NOT_NULL(wrapped);
+    memcpy(wrapped, &(DWORD){ ID_MD21 }, sizeof(DWORD));
+    memcpy(wrapped + 4, &solid_size, sizeof(solid_size));
+    memcpy(wrapped + 8, solid, solid_size);
+    ASSERT_EQ_INT((int)WowM2_ParseCollision(wrapped, solid_size + 8, &view), WOW_M2_COLLISION_VALID);
+    free(wrapped);
+
+    ((LPWOWM2HEADERLEGACY)grass)->collision_indices = (WOWM2ARRAY){ 3, sizeof(*header) };
+    ASSERT_EQ_INT((int)WowM2_ParseCollision(grass, grass_size, &view), WOW_M2_COLLISION_MALFORMED);
+    header = (LPCWOWM2HEADERLEGACY)solid;
+    solid[header->collision_indices.offset] = 99;
+    ASSERT_EQ_INT((int)WowM2_ParseCollision(solid, solid_size, &view), WOW_M2_COLLISION_MALFORMED);
+    free(solid);
+    free(grass);
+}
+
+/* Chunk broadphase reuses one solid mesh, ignores grass, applies transforms, and unloads with the tile LRU. */
+static void test_wow_doodad_query_handles_broadphase_transform_scale_and_cache(void) {
+    struct game_export *game = init_game();
+    WOWSWEEPQUERY sweep = {
+        .start = { 100.0f, 190.0f, 20.0f },
+        .displacement = { 20.0f, 0.0f, 0.0f },
+        .radius = 0.6f,
+        .height = 2.0f,
+    };
+    WOWSWEEPRESULT trace;
+    WOWWORLDPROFILE profile;
+    WOWGROUNDRESULT ground;
+    DWORD allocations;
+
+    test_doodad_fixture_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    ASSERT(CM_WowQueryGround(&(WOWGROUNDQUERY){
+        .origin = { 100.0f, 190.0f, 20.25f }, .max_down = 1.0f, .max_up = 0.25f,
+    }, &ground));
+    CM_WowWorldProfileEnable(true);
+    CM_WowWorldProfileReset();
+    allocations = test_mem_alloc_calls;
+    ASSERT(CM_WowSweepWorld(&sweep, &trace));
+    ASSERT_EQ_INT((int)test_mem_alloc_calls, (int)allocations);
+    ASSERT_EQ_INT((int)trace.surface, WOW_SURFACE_DOODAD);
+    ASSERT(trace.fraction > 0.3f && trace.fraction < 0.45f);
+    ASSERT_EQ_INT((int)test_doodad_solid_reads, 1);
+    ASSERT_EQ_INT((int)test_doodad_grass_reads, 1);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_DOODAD_BROADPHASE_CANDIDATES], 1);
+    ASSERT(profile.counters[WOW_WORLD_PROFILE_DOODAD_INSTANCE_TESTS] < 4);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_DOODAD_TRIANGLE_TESTS], 12);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_DOODAD_HITS], 1);
+
+    sweep.start = (VECTOR3){ 115.0f, 200.0f, 20.0f };
+    sweep.displacement = (VECTOR3){ 10.0f, 0.0f, 0.0f };
+    ASSERT(!CM_WowSweepWorld(&sweep, &trace));
+    sweep.start = (VECTOR3){ 130.0f, 190.0f, 20.0f };
+    sweep.displacement = (VECTOR3){ 20.0f, 0.0f, 0.0f };
+    ASSERT(CM_WowSweepWorld(&sweep, &trace));
+    ASSERT_EQ_INT((int)trace.surface, WOW_SURFACE_DOODAD);
+    ASSERT(trace.fraction > 0.2f && trace.fraction < 0.35f);
+
+    sweep.start = (VECTOR3){ 130.0f, 205.0f, 20.0f };
+    sweep.displacement = (VECTOR3){ 0.0f, 10.0f, 0.0f };
+    sweep.radius = 0.2f;
+    ASSERT(CM_WowSweepWorld(&sweep, &trace));
+    ASSERT_EQ_INT((int)trace.surface, WOW_SURFACE_DOODAD);
+
+    FOR_LOOP(i, 9) {
+        ASSERT(CM_WowQueryGround(&(WOWGROUNDQUERY){
+            .origin = { 100.0f + (FLOAT)(i + 1) * WOW_WMO_ADT_SIZE, 200.0f, 20.25f },
+            .max_down = 1.0f, .max_up = 0.25f,
+        }, &ground));
+    }
+    ASSERT_EQ_INT((int)test_doodad_solid_reads, 1);
+    ASSERT(CM_WowSweepWorld(&(WOWSWEEPQUERY){
+        .start = { 100.0f, 190.0f, 20.0f }, .displacement = { 20.0f, 0.0f, 0.0f },
+        .radius = 0.6f, .height = 2.0f,
+    }, &trace));
+    ASSERT_EQ_INT((int)test_doodad_solid_reads, 2);
+    ASSERT_EQ_INT((int)test_doodad_grass_reads, 2);
+    CM_WowWorldProfileEnable(false);
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Player movement slides on the same doodad triangles that clamp camera sweeps. */
+static void test_wow_doodad_collision_drives_movement_slide_and_camera(void) {
+    struct game_export *game = init_game();
+    LPEDICT player = &wow_edicts[0];
+    wowEntityLocal_t *local = Wow_EntityLocal(player);
+    VECTOR3 start = { 100.0f, 188.0f, 20.0f };
+    WOWSWEEPRESULT trace;
+
+    test_doodad_fixture_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    memset(player, 0, sizeof(*player)); memset(local, 0, sizeof(*local));
+    player->inuse = true; player->s.number = 0; player->s.model = 1; player->s.radius = 0.6f;
+    local->kind = WOW_ENTITY_PLAYER; local->health = local->max_health = 100;
+    ASSERT(Wow_PlaceEntityOnGround(player, &start));
+    ASSERT(Wow_MoveEntity(player, &(VECTOR2){ 20.0f, 4.0f }, 0.5f));
+    ASSERT(player->s.origin.y > 190.0f);
+    ASSERT(player->s.origin.x > 100.0f);
+    ASSERT(!CM_WowSweepWorld(&(WOWSWEEPQUERY){
+        .start = player->s.origin, .radius = 0.6f, .height = 2.0f,
+    }, &trace) || !trace.start_solid);
+
+    ASSERT(CM_WowSweepWorld(&(WOWSWEEPQUERY){
+        .start = { 100.0f, 190.0f, 23.6f }, .displacement = { 20.0f, 0.0f, 0.0f },
+        .radius = 0.25f, .height = 0.5f, .mode = WOW_SWEEP_CAMERA,
+    }, &trace));
+    ASSERT_EQ_INT((int)trace.surface, WOW_SURFACE_DOODAD);
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Solid M2 geometry blocks NPC sight and Throw credit; decoration never enters the shared sweep. */
+static void test_wow_doodad_blocks_los_projectile_and_rewards(void) {
+    struct game_export *game = init_game();
+    LPEDICT player = &wow_edicts[0];
+    LPEDICT creature;
+    LPEDICT projectile;
+    wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+    wowEntityLocal_t *creature_local;
+    wowClient_t *client = &wow_clients[0];
+    VECTOR3 player_start = { 100.0f, 190.0f, 20.0f };
+    VECTOR3 creature_start = { 120.0f, 190.0f, 20.0f };
+
+    test_doodad_fixture_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    memset(player, 0, sizeof(*player)); memset(player_local, 0, sizeof(*player_local));
+    memset(client, 0, sizeof(*client));
+    player->inuse = true; player->s.number = 0; player->s.model = 1; player->s.radius = 1.0f;
+    player->client = &client->client; player->attack = Wow_AIAttack; player->pain = Wow_AIPain;
+    player_local->kind = WOW_ENTITY_PLAYER; player_local->health = player_local->max_health = 100;
+    player_local->max_power = BZ_WOW_PLAYER_MAX_POWER; player_local->level = 1;
+    ASSERT(Wow_PlaceEntityOnGround(player, &player_start));
+
+    creature = Wow_Spawn();
+    ASSERT_NOT_NULL(creature);
+    creature_local = Wow_EntityLocal(creature);
+    creature->s.model = 1; creature->s.radius = 0.5f;
+    creature_local->kind = WOW_ENTITY_CREATURE; creature_local->hostile = true;
+    creature_local->health = creature_local->max_health = 1;
+    creature_local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    creature_local->home = (VECTOR2){ creature_start.x, creature_start.y };
+    creature_local->ai_state = WOW_AI_IDLE;
+    ASSERT(Wow_PlaceEntityOnGround(creature, &creature_start));
+    Wow_AIResetNavigation(creature);
+    ASSERT(!Wow_HasLineOfSight(creature, player));
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_IDLE);
+    ASSERT_NULL(creature_local->enemy);
+
+    player_local->enemy = creature;
+    player->client->ps.selected_entity = creature->s.number;
+    client->quest = (WOWQUESTPROGRESS){ .id = WOW_QUEST_FIRST_HUNT, .state = WOW_QUEST_ACTIVE };
+    ASSERT(Wow_UseAbility(player, WOW_ABILITY_THROW));
+    projectile = &wow_edicts[globals.num_edicts - 1];
+    ASSERT_EQ_INT((int)Wow_EntityLocal(projectile)->kind, WOW_ENTITY_PROJECTILE);
+    FOR_LOOP(i, 20)
+        if (projectile->inuse) Wow_RunProjectile(projectile);
+    ASSERT(!projectile->inuse);
+    ASSERT_EQ_INT((int)creature_local->health, 1);
+    ASSERT(!creature_local->dead);
+    ASSERT_EQ_INT((int)player_local->xp, 0);
+    ASSERT_EQ_INT((int)player_local->power, 0);
+    ASSERT_EQ_INT((int)client->quest.count, 0);
+    ASSERT_EQ_INT((int)creature_local->loot_state, WOW_LOOT_NONE);
+    ASSERT_EQ_INT((int)creature_local->num_loot, 0);
+    player->client = NULL;
     if (game->Shutdown) game->Shutdown();
 }
 
@@ -2085,6 +2363,10 @@ int main(void) {
     RUN_TEST(test_wow_world_profile_counts_resets_and_preserves_queries);
     RUN_TEST(test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards);
     RUN_TEST(test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp);
+    RUN_TEST(test_wow_m2_collision_contract_validates_legacy_mesh_and_decoration);
+    RUN_TEST(test_wow_doodad_query_handles_broadphase_transform_scale_and_cache);
+    RUN_TEST(test_wow_doodad_collision_drives_movement_slide_and_camera);
+    RUN_TEST(test_wow_doodad_blocks_los_projectile_and_rewards);
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
     RUN_TEST(test_wow_action_commands_bind_three_server_abilities);

@@ -157,6 +157,8 @@ static void CM_WowLoadAdtHeights(cmWowAdtHeightCache_t *cache, int tile_x, int t
     LPBYTE data;
     DWORD size = 0, offset = 0;
 
+    /* Eviction must release tile-owned world geometry; the old memset leaked collision references. */
+    CM_WowCollisionTileFree(&cache->collision);
     memset(cache, 0, sizeof(*cache));
     cache->loaded = true;
     cache->tile_x = tile_x;
@@ -216,9 +218,10 @@ static void CM_WowLoadAdtHeights(cmWowAdtHeightCache_t *cache, int tile_x, int t
     }
     if (!CM_WowCollisionTileLoad(&cache->collision, data, size))
         fprintf(stderr, "OpenWoW collision: failed to load ADT tile %d,%d objects\n", tile_x, tile_y);
-    else if (cache->collision.instance_count)
-        fprintf(stderr, "OpenWoW collision: ADT tile %d,%d loaded %u WMO instances\n",
-                tile_x, tile_y, (unsigned)cache->collision.instance_count);
+    else if (cache->collision.instance_count || cache->collision.doodad_instance_count)
+        fprintf(stderr, "OpenWoW collision: ADT tile %d,%d loaded %u WMO and %u solid doodad instances\n",
+                tile_x, tile_y, (unsigned)cache->collision.instance_count,
+                (unsigned)cache->collision.doodad_instance_count);
     FS_FreeFile(data);
 }
 

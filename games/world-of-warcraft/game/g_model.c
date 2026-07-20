@@ -1,4 +1,5 @@
 #include "g_wow_local.h"
+#include "common/wow_m2_format.h"
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
@@ -178,19 +179,9 @@ static animation_t *LoadModelMD34(BYTE const *data, DWORD data_size, DWORD *out_
 
 /* ---- M2 (World of Warcraft) ---- */
 
-typedef struct {
-    int32_t size;
-    int32_t offset;
-} svM2Array_t;
+typedef WOWM2ARRAY svM2Array_t;
 
-typedef struct {
-    DWORD magic;
-    DWORD version;
-    svM2Array_t name;
-    DWORD flags;
-    svM2Array_t global_loops;
-    svM2Array_t sequences;
-} svM2Header_t;
+typedef WOWM2HEADER svM2Header_t;
 
 typedef struct {
     WORD  animation_id;
@@ -279,20 +270,11 @@ typedef struct {
 
 static BOOL M2ArrayRange(svM2Array_t array, DWORD elem_size, DWORD file_size,
                          DWORD *offset, DWORD *bytes) {
-    if (array.size <= 0 || array.offset < 0 || elem_size == 0)
-        return false;
-    if ((DWORD)array.size > ((DWORD)~0u) / elem_size)
-        return false;
-    *offset = (DWORD)array.offset;
-    *bytes  = (DWORD)array.size * elem_size;
-    return *offset <= file_size && *bytes <= file_size - *offset;
+    return WowM2_ArrayRange(array, elem_size, file_size, offset, bytes);
 }
 
 static void const *M2ArrayAt(BYTE const *data, DWORD file_size, svM2Array_t array, DWORD elem_size) {
-    DWORD offset, bytes;
-    if (!M2ArrayRange(array, elem_size, file_size, &offset, &bytes))
-        return NULL;
-    return data + offset;
+    return WowM2_ArrayPtr(data, file_size, array, elem_size);
 }
 
 /* Read the first timestamp for a given sequence from an event track.
@@ -322,53 +304,12 @@ static DWORD M2EventTrackTime(BYTE const *data, DWORD file_size,
     }
 }
 
-/* Read the events m2Array_t from the correct header offset.
- * Classic M2 (version <= 263) has playable_animation_lookup between
- * sequence_lookups and bones, shifting events to a later offset. */
+/* Read events through the shared versioned header contract so collision and animation offsets cannot drift. */
 static svM2Array_t M2ReadEventsArray(BYTE const *payload, DWORD payload_size) {
     svM2Array_t empty = { 0, 0 };
-    svM2Header_t const *hdr = (svM2Header_t const *)payload;
-    BOOL classic = hdr->version <= 263;
-    /* events offset from start of M2 header:
-     *   modern: 264 bytes (no playable_animation_lookup, no texture_flipbooks, views is uint32)
-     *   classic: 284 bytes (has playable_animation_lookup + texture_flipbooks, views is m2Array) */
-    DWORD events_offset = classic ? 284 : 264;
-    if (events_offset + sizeof(svM2Array_t) > payload_size)
-        return empty;
-    return *(svM2Array_t const *)(payload + events_offset);
-}
 
-static BOOL M2FindPayload(BYTE const *data, DWORD size,
-                          BYTE const **payload, DWORD *payload_size) {
-    if (!data || size < sizeof(DWORD))
-        return false;
-    if (*(DWORD const *)data == ID_MD20) {
-        *payload      = data;
-        *payload_size = size;
-        return true;
-    }
-    if (*(DWORD const *)data != ID_MD21 && *(DWORD const *)data != ID_12DM)
-        return false;
-
-    BYTE const *ptr = data;
-    BYTE const *end = data + size;
-    while (ptr + 8 <= end) {
-        DWORD tag, chunk_size;
-        memcpy(&tag,        ptr,     sizeof(tag));
-        memcpy(&chunk_size, ptr + 4, sizeof(chunk_size));
-        ptr += 8;
-        if (chunk_size > (DWORD)(end - ptr))
-            return false;
-        if (tag == ID_MD20 ||
-            ((tag == ID_MD21 || tag == ID_12DM) &&
-             chunk_size >= sizeof(DWORD) && *(DWORD const *)ptr == ID_MD20)) {
-            *payload      = ptr;
-            *payload_size = chunk_size;
-            return true;
-        }
-        ptr += chunk_size;
-    }
-    return false;
+    return WowM2_HeaderArrays(payload, payload_size, NULL, NULL, NULL, &empty, NULL) ? empty :
+        (svM2Array_t){ 0, 0 };
 }
 
 static void M2AnimationName(WORD id, LPSTR out, DWORD out_size) {
@@ -485,7 +426,7 @@ static animation_t *LoadModelM2(BYTE const *data, DWORD read_size, DWORD *out_co
     }
 
     if (read_size < sizeof(svM2Header_t) ||
-        !M2FindPayload(data, read_size, &payload, &payload_size) ||
+        !WowM2_FindPayload(data, read_size, &payload, &payload_size) ||
         payload_size < sizeof(svM2Header_t)) {
         *out_count = 0;
         return NULL;

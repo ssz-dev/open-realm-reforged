@@ -9,6 +9,7 @@
 #define CM_WOW_WMO_POLY_RENDER    0x20
 #define CM_WOW_COLLISION_EPSILON  0.0001f
 #define CM_WOW_WALKABLE_NORMAL_Z  0.642788f
+#define CM_WOW_COLLISION_CHUNK_SIZE (WOW_WMO_ADT_SIZE / 16.0f)
 
 typedef struct {
     VECTOR3 start, displacement;
@@ -34,7 +35,16 @@ typedef struct {
 } CMWOWGROUPFACE;
 typedef CMWOWGROUPFACE const *LPCCMWOWGROUPFACE;
 
+typedef struct {
+    LPCCMWOWCOLLISIONTILE tile;
+    LPCWOWSWEEPQUERY query;
+    LPWOWSWEEPRESULT result;
+    LPCWOWBOX sweep_bounds;
+} CMWOWDOODADSWEEP;
+typedef CMWOWDOODADSWEEP const *LPCCMWOWDOODADSWEEP;
+
 static LPCMWOWCOLLISIONMODEL cm_wow_collision_models;
+static LPCMWOWDOODADMODEL cm_wow_doodad_models;
 
 static WOWBOX CM_WowEmptyBox(void) {
     return (WOWBOX){ .min = { FLT_MAX, FLT_MAX, FLT_MAX }, .max = { -FLT_MAX, -FLT_MAX, -FLT_MAX } };
@@ -53,21 +63,6 @@ static BOOL CM_WowBoxesIntersect(LPCWOWBOX a, LPCWOWBOX b) {
     return a->min.x <= b->max.x && a->max.x >= b->min.x &&
            a->min.y <= b->max.y && a->max.y >= b->min.y &&
            a->min.z <= b->max.z && a->max.z >= b->min.z;
-}
-
-static WOWBOX CM_WowTransformBox(LPCWOWBOX source, LPCMATRIX4 matrix) {
-    WOWBOX out = CM_WowEmptyBox();
-
-    FOR_LOOP(i, 8) {
-        VECTOR3 p = {
-            (i & 1) ? source->max.x : source->min.x,
-            (i & 2) ? source->max.y : source->min.y,
-            (i & 4) ? source->max.z : source->min.z,
-        };
-        p = Matrix4_multiply_vector3(matrix, &p);
-        CM_WowAddBoxPoint(&out, &p);
-    }
-    return out;
 }
 
 static VECTOR3 CM_WowTriangleNormal(LPCCMWOWTRIANGLE triangle) {
@@ -439,11 +434,74 @@ static LPCMWOWCOLLISIONMODEL CM_WowCollisionModel(LPCSTR path) {
     return model;
 }
 
+static void CM_WowDoodadModelFree(LPCMWOWDOODADMODEL model) {
+    SAFE_DELETE(model->vertices, MemFree);
+    SAFE_DELETE(model->indices, MemFree);
+    MemFree(model);
+}
+
+/* One refcounted M2 mesh is retained per active tile set, including negative decoration results. */
+static LPCMWOWDOODADMODEL CM_WowDoodadModelAcquire(LPCSTR path) {
+    LPCMWOWDOODADMODEL model;
+    WOWM2COLLISIONVIEW view;
+    LPBYTE data;
+    DWORD size = 0;
+    PATHSTR archive_path;
+
+    for (model = cm_wow_doodad_models; model; model = model->next)
+        if (!strcasecmp(model->path, path)) {
+            model->references++;
+            return model;
+        }
+    model = MemAlloc(sizeof(*model));
+    memset(model, 0, sizeof(*model));
+    snprintf(model->path, sizeof(model->path), "%s", path);
+    model->references = 1;
+    model->next = cm_wow_doodad_models;
+    cm_wow_doodad_models = model;
+    data = FS_ReadFile(path, &size);
+    if (!data && WowM2_ArchivePath(path, archive_path, sizeof(archive_path)))
+        data = FS_ReadFile(archive_path, &size);
+    model->status = WowM2_ParseCollision(data, size, &view);
+    if (model->status == WOW_M2_COLLISION_MALFORMED) {
+        fprintf(stderr, "OpenWoW collision: malformed M2 collision data %s\n", path);
+        SAFE_DELETE(data, FS_FreeFile);
+        return model;
+    }
+    if (model->status == WOW_M2_COLLISION_NONE) {
+        FS_FreeFile(data);
+        return model;
+    }
+    model->vertex_count = view.position_count;
+    model->index_count = view.index_count;
+    model->bounds = view.bounds;
+    model->vertices = MemAlloc(sizeof(*model->vertices) * model->vertex_count);
+    model->indices = MemAlloc(sizeof(*model->indices) * model->index_count);
+    memcpy(model->vertices, view.positions, sizeof(*model->vertices) * model->vertex_count);
+    memcpy(model->indices, view.indices, sizeof(*model->indices) * model->index_count);
+    FS_FreeFile(data);
+    return model;
+}
+
+static void CM_WowDoodadModelRelease(LPCMWOWDOODADMODEL model) {
+    LPCMWOWDOODADMODEL *link = &cm_wow_doodad_models;
+
+    if (!model || !model->references || --model->references) return;
+    while (*link && *link != model) link = &(*link)->next;
+    if (*link) *link = model->next;
+    CM_WowDoodadModelFree(model);
+}
+
 void CM_WowCollisionReset(void) {
     while (cm_wow_collision_models) {
         LPCMWOWCOLLISIONMODEL next = cm_wow_collision_models->next;
         CM_WowCollisionModelFree(cm_wow_collision_models);
         cm_wow_collision_models = next;
+    }
+    while (cm_wow_doodad_models) {
+        LPCMWOWDOODADMODEL next = cm_wow_doodad_models->next;
+        CM_WowDoodadModelFree(cm_wow_doodad_models);
+        cm_wow_doodad_models = next;
     }
 }
 
@@ -451,75 +509,145 @@ void CM_WowCollisionTileFree(LPCMWOWCOLLISIONTILE tile) {
     if (!tile) return;
     FOR_LOOP(i, tile->instance_count) SAFE_DELETE(tile->instances[i].group_bounds, MemFree);
     SAFE_DELETE(tile->instances, MemFree);
+    SAFE_DELETE(tile->doodad_instances, MemFree);
+    SAFE_DELETE(tile->doodad_chunk_refs, MemFree);
+    FOR_LOOP(i, tile->doodad_model_count) CM_WowDoodadModelRelease(tile->doodad_models[i]);
+    SAFE_DELETE(tile->doodad_models, MemFree);
     memset(tile, 0, sizeof(*tile));
 }
 
-/* ADT MWMO/MWID/MODF is loaded with the terrain tile, avoiding a second archive read or full-world scan. */
+static LPCMWOWDOODADMODEL CM_WowDoodadTileModel(LPCMWOWCOLLISIONTILE tile, LPCSTR path) {
+    FOR_LOOP(i, tile->doodad_model_count)
+        if (!strcasecmp(tile->doodad_models[i]->path, path)) return tile->doodad_models[i];
+    tile->doodad_models[tile->doodad_model_count] = CM_WowDoodadModelAcquire(path);
+    return tile->doodad_models[tile->doodad_model_count++];
+}
+
+static DWORD CM_WowDoodadChunk(LPCCMWOWCOLLISIONTILE tile, LPCWOWBOX bounds) {
+    FLOAT center_x = (bounds->min.x + bounds->max.x) * 0.5f;
+    FLOAT center_y = (bounds->min.y + bounds->max.y) * 0.5f;
+    int row = (int)floorf((tile->doodad_tile_max.x - center_x) / CM_WOW_COLLISION_CHUNK_SIZE);
+    int col = (int)floorf((tile->doodad_tile_max.y - center_y) / CM_WOW_COLLISION_CHUNK_SIZE);
+
+    row = MAX(0, MIN(15, row)); col = MAX(0, MIN(15, col));
+    return (DWORD)(row * 16 + col);
+}
+
+/* Center bucketing plus the tile's maximum mesh extent visits every overlapping instance exactly once. */
+static void CM_WowDoodadBuildPartition(LPCMWOWCOLLISIONTILE tile) {
+    DWORD counts[256] = { 0 };
+    DWORD cursors[256];
+
+    FOR_LOOP(i, tile->doodad_instance_count) counts[CM_WowDoodadChunk(tile, &tile->doodad_instances[i].bounds)]++;
+    FOR_LOOP(i, 256) tile->doodad_chunk_offsets[i + 1] = tile->doodad_chunk_offsets[i] + counts[i];
+    if (!tile->doodad_chunk_offsets[256]) return;
+    tile->doodad_chunk_refs = MemAlloc(sizeof(*tile->doodad_chunk_refs) * tile->doodad_chunk_offsets[256]);
+    memcpy(cursors, tile->doodad_chunk_offsets, sizeof(cursors));
+    FOR_LOOP(i, tile->doodad_instance_count) {
+        DWORD chunk = CM_WowDoodadChunk(tile, &tile->doodad_instances[i].bounds);
+
+        tile->doodad_chunk_refs[cursors[chunk]++] = i;
+    }
+}
+
+/* ADT WMO and doodad references are loaded with terrain so every static query shares one archive view. */
 BOOL CM_WowCollisionTileLoad(LPCMWOWCOLLISIONTILE tile, BYTE const *data, DWORD size) {
-    DWORD offset = 0, definition_count = 0;
-    LPCSTR names = NULL;
-    DWORD names_size = 0;
-    DWORD const *name_offsets = NULL;
-    DWORD name_offset_count = 0;
-    LPCWOWMAPOBJDEF definitions = NULL;
+    WOWADTOBJECTVIEW adt;
+    DWORD filedata_count = 0;
 
     if (!tile || !data) return false;
     CM_WowCollisionTileFree(tile);
-    while (offset + 8 <= size) {
-        BYTE const *tag = data + offset;
-        DWORD chunk_size = WowWmo_Read32(data + offset + 4);
-        BYTE const *chunk = data + offset + 8;
-
-        offset += 8;
-        if (offset + chunk_size > size) {
-            fprintf(stderr, "OpenWoW collision: truncated ADT object chunk\n");
-            return false;
-        }
-        if (WowWmo_TagEquals(tag, "OMWM"))
-            names = (LPCSTR)chunk, names_size = chunk_size;
-        else if (WowWmo_TagEquals(tag, "DIWM"))
-            name_offsets = (DWORD const *)chunk, name_offset_count = chunk_size / sizeof(DWORD);
-        else if (WowWmo_TagEquals(tag, "FDOM"))
-            definitions = (LPCWOWMAPOBJDEF)chunk, definition_count = chunk_size / sizeof(WOWMAPOBJDEF);
-        offset += chunk_size;
+    if (!WowAdt_ParseObjects(data, size, &adt)) {
+        fprintf(stderr, "OpenWoW collision: malformed ADT object chunks\n");
+        return false;
     }
-    if (!definition_count) return true;
-    if (!names || !name_offsets) {
+    tile->doodad_grid_valid = adt.tile_grid_valid;
+    tile->doodad_tile_max = adt.tile_max;
+    if (adt.wmo_definition_count && (!adt.wmo_names || !adt.wmo_name_offsets)) {
         fprintf(stderr, "OpenWoW collision: ADT MODF lacks MWMO/MWID names\n");
         return false;
     }
-    tile->instances = MemAlloc(sizeof(*tile->instances) * definition_count);
-    memset(tile->instances, 0, sizeof(*tile->instances) * definition_count);
-    FOR_LOOP(i, definition_count) {
-        LPCWOWMAPOBJDEF definition = definitions + i;
-        WOWWMOREFERENCE reference = {
-            .blob = names, .blob_size = names_size, .offsets = name_offsets,
-            .offset_count = name_offset_count, .index = definition->name_id,
-        };
-        LPCSTR path = WowWmo_StringRef(&reference);
-        LPCMWOWCOLLISIONMODEL model;
-        LPCMWOWCOLLISIONINSTANCE instance;
+    if (adt.wmo_definition_count) {
+        tile->instances = MemAlloc(sizeof(*tile->instances) * adt.wmo_definition_count);
+        memset(tile->instances, 0, sizeof(*tile->instances) * adt.wmo_definition_count);
+        FOR_LOOP(i, adt.wmo_definition_count) {
+            LPCWOWMAPOBJDEF definition = adt.wmo_definitions + i;
+            WOWWMOREFERENCE reference = {
+                .blob = adt.wmo_names, .blob_size = adt.wmo_names_size,
+                .offsets = adt.wmo_name_offsets, .offset_count = adt.wmo_name_offset_count,
+                .index = definition->name_id,
+            };
+            LPCSTR path = WowWmo_StringRef(&reference);
+            LPCMWOWCOLLISIONMODEL model;
+            LPCMWOWCOLLISIONINSTANCE instance;
 
+            if (!path) {
+                fprintf(stderr, "OpenWoW collision: ADT MODF %u has invalid WMO name %u\n",
+                        (unsigned)i, (unsigned)definition->name_id);
+                continue;
+            }
+            model = CM_WowCollisionModel(path);
+            if (!model) continue;
+            instance = &tile->instances[tile->instance_count++];
+            instance->model = model;
+            instance->bounds = CM_WowEmptyBox();
+            WowWmo_InstanceMatrix(definition, &instance->matrix);
+            instance->group_bounds = MemAlloc(sizeof(*instance->group_bounds) * model->group_count);
+            FOR_LOOP(group_index, model->group_count) {
+                instance->group_bounds[group_index] =
+                    WowWmo_TransformBox(&model->groups[group_index].bounds, &instance->matrix);
+                if (!CM_WowBoxValid(&instance->group_bounds[group_index])) continue;
+                CM_WowAddBoxPoint(&instance->bounds, (LPCVECTOR3)&instance->group_bounds[group_index].min);
+                CM_WowAddBoxPoint(&instance->bounds, (LPCVECTOR3)&instance->group_bounds[group_index].max);
+            }
+        }
+    }
+    if (!adt.doodad_definition_count) return true;
+    if (!adt.doodad_names || !adt.doodad_name_offsets || !tile->doodad_grid_valid) {
+        fprintf(stderr, "OpenWoW collision: ADT MDDF lacks MMDX/MMID names or MCNK grid\n");
+        CM_WowCollisionTileFree(tile);
+        return false;
+    }
+    tile->doodad_models = MemAlloc(sizeof(*tile->doodad_models) * adt.doodad_definition_count);
+    tile->doodad_instances = MemAlloc(sizeof(*tile->doodad_instances) * adt.doodad_definition_count);
+    memset(tile->doodad_instances, 0, sizeof(*tile->doodad_instances) * adt.doodad_definition_count);
+    FOR_LOOP(i, adt.doodad_definition_count) {
+        LPCWOWDOODADDEF definition = adt.doodad_definitions + i;
+        WOWWMOREFERENCE reference = {
+            .blob = adt.doodad_names, .blob_size = adt.doodad_names_size,
+            .offsets = adt.doodad_name_offsets, .offset_count = adt.doodad_name_offset_count,
+            .index = definition->name_id,
+        };
+        LPCSTR path;
+        LPCMWOWDOODADMODEL model;
+        LPCMWOWDOODADINSTANCE instance;
+
+        /* MDDF 0x40 stores a FileDataID instead of an MMDX index and cannot use this path contract. */
+        if (definition->flags & 0x40) {
+            filedata_count++;
+            continue;
+        }
+        path = WowWmo_StringRef(&reference);
         if (!path) {
-            fprintf(stderr, "OpenWoW collision: ADT MODF %u has invalid WMO name %u\n",
+            fprintf(stderr, "OpenWoW collision: ADT MDDF %u has invalid M2 name %u\n",
                     (unsigned)i, (unsigned)definition->name_id);
             continue;
         }
-        model = CM_WowCollisionModel(path);
-        if (!model) continue;
-        instance = &tile->instances[tile->instance_count++];
+        model = CM_WowDoodadTileModel(tile, path);
+        if (model->status != WOW_M2_COLLISION_VALID) continue;
+        instance = &tile->doodad_instances[tile->doodad_instance_count++];
         instance->model = model;
-        instance->bounds = CM_WowEmptyBox();
-        WowWmo_InstanceMatrix(definition, &instance->matrix);
-        instance->group_bounds = MemAlloc(sizeof(*instance->group_bounds) * model->group_count);
-        FOR_LOOP(group_index, model->group_count) {
-            instance->group_bounds[group_index] =
-                CM_WowTransformBox(&model->groups[group_index].bounds, &instance->matrix);
-            if (!CM_WowBoxValid(&instance->group_bounds[group_index])) continue;
-            CM_WowAddBoxPoint(&instance->bounds, (LPCVECTOR3)&instance->group_bounds[group_index].min);
-            CM_WowAddBoxPoint(&instance->bounds, (LPCVECTOR3)&instance->group_bounds[group_index].max);
-        }
+        WowM2_DoodadMatrix(definition, &instance->matrix);
+        instance->bounds = WowWmo_TransformBox(&model->bounds, &instance->matrix);
+        tile->doodad_max_extent.x = MAX(tile->doodad_max_extent.x,
+            (instance->bounds.max.x - instance->bounds.min.x) * 0.5f);
+        tile->doodad_max_extent.y = MAX(tile->doodad_max_extent.y,
+            (instance->bounds.max.y - instance->bounds.min.y) * 0.5f);
     }
+    if (filedata_count)
+        fprintf(stderr, "OpenWoW collision: ADT skipped %u FileDataID doodads without path references\n",
+                (unsigned)filedata_count);
+    CM_WowDoodadBuildPartition(tile);
     return true;
 }
 
@@ -591,6 +719,92 @@ BOOL CM_WowCollisionGroundTile(LPCCMWOWCOLLISIONTILE tile,
     return found;
 }
 
+static BOOL CM_WowDoodadChunkRange(LPCCMWOWCOLLISIONTILE tile, LPCWOWBOX bounds,
+                                   int range[4]) {
+    FLOAT tile_min_x = tile->doodad_tile_max.x - WOW_WMO_ADT_SIZE;
+    FLOAT tile_min_y = tile->doodad_tile_max.y - WOW_WMO_ADT_SIZE;
+    WOWBOX expanded = *bounds;
+
+    expanded.min.x -= tile->doodad_max_extent.x; expanded.max.x += tile->doodad_max_extent.x;
+    expanded.min.y -= tile->doodad_max_extent.y; expanded.max.y += tile->doodad_max_extent.y;
+    if (!tile->doodad_grid_valid || expanded.max.x < tile_min_x ||
+        expanded.min.x > tile->doodad_tile_max.x || expanded.max.y < tile_min_y ||
+        expanded.min.y > tile->doodad_tile_max.y)
+        return false;
+    range[0] = MAX(0, (int)floorf((tile->doodad_tile_max.x - expanded.max.x) /
+                                   CM_WOW_COLLISION_CHUNK_SIZE));
+    range[1] = MIN(15, (int)floorf((tile->doodad_tile_max.x - expanded.min.x) /
+                                    CM_WOW_COLLISION_CHUNK_SIZE));
+    range[2] = MAX(0, (int)floorf((tile->doodad_tile_max.y - expanded.max.y) /
+                                   CM_WOW_COLLISION_CHUNK_SIZE));
+    range[3] = MIN(15, (int)floorf((tile->doodad_tile_max.y - expanded.min.y) /
+                                    CM_WOW_COLLISION_CHUNK_SIZE));
+    return range[0] <= range[1] && range[2] <= range[3];
+}
+
+static BOOL CM_WowDoodadTriangle(LPCCMWOWDOODADINSTANCE instance, DWORD face,
+                                 LPCMWOWTRIANGLE triangle) {
+    DWORD first = face * 3;
+    WORD ia, ib, ic;
+
+    if (first + 2 >= instance->model->index_count) return false;
+    ia = instance->model->indices[first];
+    ib = instance->model->indices[first + 1];
+    ic = instance->model->indices[first + 2];
+    if (ia >= instance->model->vertex_count || ib >= instance->model->vertex_count ||
+        ic >= instance->model->vertex_count)
+        return false;
+    *triangle = (CMWOWTRIANGLE){
+        Matrix4_multiply_vector3(&instance->matrix, instance->model->vertices + ia),
+        Matrix4_multiply_vector3(&instance->matrix, instance->model->vertices + ib),
+        Matrix4_multiply_vector3(&instance->matrix, instance->model->vertices + ic),
+    };
+    return true;
+}
+
+/* Chunk-center refs bound candidate work while exact transformed collision triangles remain authoritative. */
+static BOOL CM_WowCollisionSweepDoodads(LPCCMWOWDOODADSWEEP sweep) {
+    LPCCMWOWCOLLISIONTILE tile = sweep->tile;
+    LPCWOWSWEEPQUERY query = sweep->query;
+    int range[4];
+    BOOL hit = false;
+
+    if (!tile->doodad_instance_count ||
+        !CM_WowDoodadChunkRange(tile, sweep->sweep_bounds, range)) return false;
+    for (int row = range[0]; row <= range[1]; row++)
+        for (int col = range[2]; col <= range[3]; col++) {
+            DWORD chunk = (DWORD)(row * 16 + col);
+
+            for (DWORD ref = tile->doodad_chunk_offsets[chunk];
+                 ref < tile->doodad_chunk_offsets[chunk + 1]; ref++) {
+                LPCCMWOWDOODADINSTANCE instance = tile->doodad_instances + tile->doodad_chunk_refs[ref];
+                BOOL instance_hit = false;
+
+                CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_DOODAD_INSTANCE_TESTS, 1);
+                if (!CM_WowBoxesIntersect(&instance->bounds, sweep->sweep_bounds)) continue;
+                CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_DOODAD_BROADPHASE_CANDIDATES, 1);
+                FOR_LOOP(face, instance->model->index_count / 3) {
+                    CMWOWTRIANGLE triangle;
+                    VECTOR3 normal;
+
+                    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_DOODAD_TRIANGLE_TESTS, 1);
+                    CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TRIANGLE_TESTS, 1);
+                    if (!CM_WowDoodadTriangle(instance, face, &triangle)) continue;
+                    normal = CM_WowTriangleNormal(&triangle);
+                    if (query->mode == WOW_SWEEP_MOVEMENT &&
+                        fabsf(normal.z) >= CM_WOW_WALKABLE_NORMAL_Z)
+                        continue;
+                    instance_hit |= CM_WowCollisionSweepTriangle(&(CMWOWTRIANGLESWEEP){
+                        .query = query, .triangle = triangle, .surface = WOW_SURFACE_DOODAD,
+                    }, sweep->result);
+                }
+                if (instance_hit) CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_DOODAD_HITS, 1);
+                hit |= instance_hit;
+            }
+        }
+    return hit;
+}
+
 BOOL CM_WowCollisionSweepTile(LPCCMWOWCOLLISIONTILE tile,
                               LPCWOWSWEEPQUERY query,
                               LPWOWSWEEPRESULT result) {
@@ -626,5 +840,8 @@ BOOL CM_WowCollisionSweepTile(LPCCMWOWCOLLISIONTILE tile,
             }
         }
     }
+    hit |= CM_WowCollisionSweepDoodads(&(CMWOWDOODADSWEEP){
+        .tile = tile, .query = query, .result = result, .sweep_bounds = &sweep_bounds,
+    });
     return hit;
 }

@@ -1,4 +1,5 @@
 #include "renderer/r_game.h"
+#include "common/wow_m2_format.h"
 #include "wow/r_wowmap.h"
 
 void R_RegisterMap(LPCSTR mapFileName);
@@ -92,10 +93,8 @@ LPMODEL R_GameLoadModel(LPCSTR modelFilename) {
     snprintf(load_name, sizeof(load_name), "%s", modelFilename ? modelFilename : "");
     if ((fileSize < 0 || !buffer) && R_GamePathHasExtension(modelFilename, ".mdx")) {
         PATHSTR tempFileName = { 0 };
-        LPSTR ext = strstr(modelFilename, ".mdx");
 
-        strncpy(tempFileName, modelFilename, ext - modelFilename);
-        strcpy(tempFileName + strlen(tempFileName), ".m2");
+        WowM2_ArchivePath(modelFilename, tempFileName, sizeof(tempFileName));
         fileSize = ri.FS_ReadFile(tempFileName, &buffer);
         if (fileSize >= 0 && buffer) {
             snprintf(load_name, sizeof(load_name), "%s", tempFileName);
@@ -150,6 +149,12 @@ bool R_GameEntityMatrix(renderEntity_t const *entity, LPMATRIX4 matrix) {
 
     if (!entity || !entity->model || entity->model->modeltype != ID_MD20) {
         return false;
+    }
+    if (!(entity->flags & RF_GROUND_ANCHOR)) {
+        WowM2_InstanceMatrix(&(WOWM2INSTANCE){
+            .origin = entity->origin, .rotation = entity->rotation, .scale = entity->scale,
+        }, matrix);
+        return true;
     }
 
     origin = entity->origin;

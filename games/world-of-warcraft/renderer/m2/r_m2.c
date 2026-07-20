@@ -1,4 +1,5 @@
 #include "renderer/r_local.h"
+#include "common/wow_m2_format.h"
 #include <stdlib.h>
 #include <strings.h>
 
@@ -17,19 +18,13 @@ enum {
     M2_CHAR_TEX_COUNT
 };
 
-typedef struct {
-    int32_t size;
-    int32_t offset;
-} m2Array_t;
+typedef WOWM2ARRAY m2Array_t;
 
 typedef struct {
     BYTE v[4];
 } m2Ubyte4_t;
 
-typedef struct {
-    VECTOR3 min;
-    VECTOR3 max;
-} m2Box_t;
+typedef WOWM2BOX m2Box_t;
 
 typedef struct {
     uint16_t track_type;
@@ -168,88 +163,8 @@ typedef struct {
 static m2TrackView_t M2_ModernTrackView(m2Track_t const *track);
 static m2TrackView_t M2_ClassicTrackView(m2TrackClassic_t const *track);
 
-typedef struct {
-    DWORD magic;
-    DWORD version;
-    m2Array_t name;
-    DWORD flags;
-    m2Array_t global_loops;
-    m2Array_t sequences;
-    m2Array_t sequence_lookups;
-    m2Array_t bones;
-    m2Array_t key_bone_lookup;
-    m2Array_t vertices;
-    DWORD num_skin_profiles;
-    m2Array_t colors;
-    m2Array_t textures;
-    m2Array_t texture_weights;
-    m2Array_t texture_transforms;
-    m2Array_t replaceable_texture_lookup;
-    m2Array_t materials;
-    m2Array_t bone_lookup_table;
-    m2Array_t texture_lookup_table;
-    m2Array_t tex_unit_lookup_table;
-    m2Array_t transparency_lookup_table;
-    m2Array_t texture_transforms_lookup_table;
-    m2Box_t bounding_box;
-    float bounding_sphere_radius;
-    m2Box_t collision_box;
-    float collision_sphere_radius;
-    m2Array_t collision_indices;
-    m2Array_t collision_positions;
-    m2Array_t collision_normals;
-    m2Array_t attachments;
-    m2Array_t attachment_lookup;
-    m2Array_t events;
-    m2Array_t lights;
-    m2Array_t cameras;
-    m2Array_t camera_lookup;
-    m2Array_t ribbons;
-    m2Array_t particles;
-    m2Array_t texture_combiner_combos;
-} m2Header_t;
-
-typedef struct {
-    DWORD magic;
-    DWORD version;
-    m2Array_t name;
-    DWORD flags;
-    m2Array_t global_loops;
-    m2Array_t sequences;
-    m2Array_t sequence_lookups;
-    m2Array_t playable_animation_lookup;
-    m2Array_t bones;
-    m2Array_t key_bone_lookup;
-    m2Array_t vertices;
-    m2Array_t views;
-    m2Array_t colors;
-    m2Array_t textures;
-    m2Array_t transparency_lookup;
-    m2Array_t texture_flipbooks;
-    m2Array_t texture_animations;
-    m2Array_t color_replacements;
-    m2Array_t render_flags;
-    m2Array_t bone_lookup_table;
-    m2Array_t texture_lookup_table;
-    m2Array_t tex_unit_lookup_table;
-    m2Array_t transparency_lookup_table;
-    m2Array_t texture_transforms_lookup_table;
-    m2Box_t bounding_box;
-    float bounding_sphere_radius;
-    m2Box_t collision_box;
-    float collision_sphere_radius;
-    m2Array_t collision_indices;
-    m2Array_t collision_positions;
-    m2Array_t collision_normals;
-    m2Array_t attachments;
-    m2Array_t attachment_lookup;
-    m2Array_t events;
-    m2Array_t lights;
-    m2Array_t cameras;
-    m2Array_t camera_lookup;
-    m2Array_t ribbons;
-    m2Array_t particles;
-} m2HeaderLegacy_t;
+typedef WOWM2HEADER m2Header_t;
+typedef WOWM2HEADERLEGACY m2HeaderLegacy_t;
 
 typedef struct {
     VECTOR3 pos;
@@ -491,30 +406,6 @@ static BOOL M2_PathHasExtension(LPCSTR path, LPCSTR extension) {
     path_len = strlen(path);
     ext_len = strlen(extension);
     return path_len >= ext_len && strcasecmp(path + path_len - ext_len, extension) == 0;
-}
-
-static BOOL M2_TagEquals(BYTE const *tag, LPCSTR reversed) {
-    return memcmp(tag, reversed, 4) == 0;
-}
-
-static BYTE const *M2_FindChunk(BYTE const *data, DWORD size, LPCSTR reversed_tag, LPDWORD chunk_size) {
-    DWORD offset = 0;
-
-    while (offset + 8 <= size) {
-        BYTE const *tag = data + offset;
-        DWORD current_size;
-        memcpy(&current_size, data + offset + 4, sizeof(current_size));
-        offset += 8;
-        if (offset + current_size > size) {
-            break;
-        }
-        if (M2_TagEquals(tag, reversed_tag)) {
-            *chunk_size = current_size;
-            return data + offset;
-        }
-        offset += current_size;
-    }
-    return NULL;
 }
 
 static BOOL M2_CopyWithExtension(LPCSTR path, LPCSTR extension, LPSTR out, DWORD out_size) {
@@ -1393,25 +1284,11 @@ static BOOL M2_DefaultCreatureTexturePath(LPCSTR model_path,
 }
 
 static BOOL M2_ArrayRange(m2Array_t array, DWORD elem_size, DWORD file_size, DWORD *offset, DWORD *bytes) {
-    if (array.size <= 0 || array.offset < 0 || elem_size == 0) {
-        return false;
-    }
-    if ((DWORD)array.size > (((DWORD)~0u) / elem_size)) {
-        return false;
-    }
-    *offset = (DWORD)array.offset;
-    *bytes = (DWORD)array.size * elem_size;
-    return *offset <= file_size && *bytes <= file_size - *offset;
+    return WowM2_ArrayRange(array, elem_size, file_size, offset, bytes);
 }
 
 static void *M2_ArrayPtr(BYTE const *base, DWORD file_size, m2Array_t array, DWORD elem_size) {
-    DWORD offset;
-    DWORD bytes;
-
-    if (!M2_ArrayRange(array, elem_size, file_size, &offset, &bytes)) {
-        return NULL;
-    }
-    return (void *)(base + offset);
+    return (void *)WowM2_ArrayPtr(base, file_size, array, elem_size);
 }
 
 static void *M2_ModelArrayPtr(m2Model_t const *model, m2Array_t array, DWORD elem_size) {
@@ -2571,21 +2448,8 @@ m2Model_t *R_LoadModelM2(LPCSTR modelFilename, void *buffer, DWORD size) {
         return M2_CreateFallbackModel(modelFilename, "missing model data");
     }
 
-    if (*(DWORD *)buffer == ID_MD21) {
-        m2_base = M2_FindChunk(buffer, size, "MD21", &m2_size);
-        if (!m2_base) {
-            m2_base = buffer;
-            m2_size = size;
-        }
-    } else if (*(DWORD *)buffer == ID_12DM) {
-        m2_base = M2_FindChunk(buffer, size, "12DM", &m2_size);
-    }
-    if (!m2_base || m2_size < sizeof(DWORD) * 2) {
+    if (!WowM2_FindPayload(buffer, size, &m2_base, &m2_size) || m2_size < sizeof(DWORD) * 2) {
         return M2_CreateFallbackModel(modelFilename, "truncated header");
-    }
-
-    if (*(DWORD *)m2_base != ID_MD20) {
-        return M2_CreateFallbackModel(modelFilename, "bad MD20 header");
     }
 
     if (!M2_InitModernGeometry(m2_base, m2_size, &geom, &modern_header)) {

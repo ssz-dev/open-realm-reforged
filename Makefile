@@ -110,6 +110,7 @@ TOOL_DEPS := $(shell find tools -maxdepth 1 -name '*.h' | sort)
 CLIENT_HEADERS := $(shell find client -name '*.h' | sort)
 COMMON_HEADERS := $(shell find common -name '*.h' | sort)
 WOW_COMMON_SRCS := $(shell find $(WOW_DIR)/common -name '*.c' 2>/dev/null | sort)
+WOW_COMMON_HEADERS := $(shell find $(WOW_DIR)/common -name '*.h' 2>/dev/null | sort)
 SC2_COMMON_SRCS := $(shell find $(SC2_DIR)/common -name '*.c' 2>/dev/null | sort)
 WORLD_CORE_SRCS := common/world.c common/routing.c
 FONT_SRC := renderer/conchars.pcx
@@ -260,6 +261,11 @@ $(BIN_DIR)/m2tool$(EXE_EXT): tools/m2tool.c $(TOOL_DEPS) $(CLIENT_HEADERS) $(COM
 	@$(CC) $(WOW_CFLAGS) -o $@ $< \
 		$(RPATH) $(LDFLAGS) -lrenderer-wow -lsheet -lshared $(LIBS) -lm -lz
 
+$(BIN_DIR)/mpqtool$(EXE_EXT): tools/mpqtool.c $(TOOL_DEPS) $(CLIENT_HEADERS) $(COMMON_HEADERS) \
+	$(WOW_DIR)/common/wow_m2_format.h $(WOW_DIR)/common/wow_wmo_format.h | $(BIN_DIR) $(SHARED_LIB)
+	@$(CC) $(WOW_CFLAGS) -o $@ $< \
+		$(RPATH) $(LDFLAGS) -lshared $(LIBS) -lm -lz
+
 $(BIN_DIR)/m3tool$(EXE_EXT): tools/m3tool.c $(TOOL_DEPS) $(CLIENT_HEADERS) $(COMMON_HEADERS) | $(BIN_DIR) $(SHARED_LIB) $(SHEET_LIB) $(RENDERER_SC2_LIB)
 	@$(CC) $(SC2_CFLAGS) -o $@ $< \
 		$(RPATH) $(LDFLAGS) -lrenderer-sc2 -lsheet -lshared $(LIBS) -lm -lz $(SC2_XML_LIBS)
@@ -283,10 +289,10 @@ $(BIN_DIR)/imgdiff$(EXE_EXT): tools/imgdiff.c renderer/stb/stb_image.h renderer/
 $(FONT_HEADER): $(FONT_SRC) $(BIN_DIR)/img2sysfont$(EXE_EXT)
 	@$(BIN_DIR)/img2sysfont$(EXE_EXT) $(FONT_SRC) $(FONT_HEADER) $(FONT_SYMBOL)
 
-$(eval $(call unity_lib_schema,$(RENDERER_WOW_LIB),$(RENDERER_BASE_DEPS) $(call CSRC,renderer $(WOW_DIR)/renderer),renderer-wow,renderer $(WOW_DIR)/renderer,,$(WOW_CFLAGS),common/mpq.c,$(RENDERER_SHARED_LIBS)))
+$(eval $(call unity_lib_schema,$(RENDERER_WOW_LIB),$(RENDERER_BASE_DEPS) $(WOW_COMMON_HEADERS) $(call CSRC,renderer $(WOW_DIR)/renderer),renderer-wow,renderer $(WOW_DIR)/renderer,,$(WOW_CFLAGS),common/mpq.c,$(RENDERER_SHARED_LIBS)))
 $(eval $(call unity_lib_schema,$(RENDERER_SC2_LIB),$(RENDERER_BASE_DEPS) $(call CSRC,renderer $(SC2_DIR)/renderer) $(SC2_COMMON_SRCS),renderer-sc2,renderer $(SC2_DIR)/renderer,,$(SC2_CFLAGS),common/mpq.c,$(RENDERER_SHARED_LIBS) $(SC2_XML_LIBS)))
 
-$(eval $(call unity_lib_schema,$(GAME_WOW_LIB),$(GAME_BASE_DEPS) common/world.c $(WOW_COMMON_SRCS) $(call CSRC,$(WOW_DIR)/game),game-wow,$(WOW_DIR)/game,,$(WOW_CFLAGS),common/mpq.c,-lshared $(LIBS) -lm -lz))
+$(eval $(call unity_lib_schema,$(GAME_WOW_LIB),$(GAME_BASE_DEPS) $(WOW_COMMON_HEADERS) common/world.c $(WOW_COMMON_SRCS) $(call CSRC,$(WOW_DIR)/game),game-wow,$(WOW_DIR)/game,,$(WOW_CFLAGS),common/mpq.c,-lshared $(LIBS) -lm -lz))
 $(eval $(call unity_lib_schema,$(GAME_SC2_LIB),$(GAME_BASE_DEPS) $(WORLD_CORE_SRCS) $(SC2_COMMON_SRCS) $(call CSRC,$(SC2_DIR)/game),game-sc2,$(SC2_DIR)/game,,$(SC2_IMPL_CFLAGS),common/mpq.c,-lshared $(LIBS) -lm -lz $(SC2_XML_LIBS)))
 
 $(eval $(call unity_lib_schema,$(UI_WOW_LIB),$(UI_BASE_DEPS) client/ui.h $(call CSRC,$(WOW_DIR)/ui),ui-wow,$(WOW_DIR)/ui,,$(WOW_UI_CFLAGS),,-lshared $(LUA_LIBS) $(WOW_XML_LIBS)))

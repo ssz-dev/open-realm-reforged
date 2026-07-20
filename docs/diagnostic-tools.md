@@ -12,6 +12,19 @@
 - Normalize slashes as needed; both `\` and `/` are accepted.
 - Default to this tool whenever you need to discover MPQ contents, inspect text assets, or extract raw file bytes for analysis.
 
+For WoW M2 collision and ADT placement inspection:
+
+- `build/bin/mpqtool -data data/world-of-warcraft m2info <model.mdx|model.m2>`
+- `build/bin/mpqtool -data data/world-of-warcraft doodadinfo <map-tile.adt>`
+
+`m2info` follows the same Classic `.mdx` to archive `.m2` resolution as
+OpenWoW, then reports `solid`, `decoration`, or `malformed` from the dedicated
+M2 collision arrays. `doodadinfo` resolves the authoritative MMDX/MMID/MDDF
+placements in engine archive-priority order and reports each distinct model's
+instance count, first world transform, and collision status. Use these commands
+before selecting a real runtime obstacle or decoration; do not infer solidity
+from filenames or render bounds.
+
 ## MDX Inspection (mdxtool)
 
 - Use `build/bin/mdxtool` to validate MDX assets and detect data problems before debugging render code.
