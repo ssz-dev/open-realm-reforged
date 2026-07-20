@@ -912,6 +912,62 @@ static void test_wow_ground_query_reads_artificial_adt(void) {
     if (game->Shutdown) game->Shutdown();
 }
 
+/* A long query may evict tiles while running, but occupancy stays fixed and map reload drops every world reference. */
+static void test_wow_world_cache_stays_bounded_across_query_and_map_lifecycle(void) {
+    struct game_export *game = init_game();
+    WOWGROUNDQUERY query = {
+        .origin = { 100.0f, 200.0f, 20.25f }, .max_down = 1.0f, .max_up = 0.25f,
+    };
+    WOWGROUNDRESULT ground;
+    WOWSWEEPRESULT trace;
+    WOWWORLDCACHESTATS stats;
+
+    test_wmo_fixture_enabled = test_doodad_fixture_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    CM_WowWorldCacheSnapshot(&stats);
+    ASSERT_EQ_INT((int)stats.capacity, 9);
+    ASSERT_EQ_INT((int)stats.loaded_tiles, 0);
+    FOR_LOOP(i, 12) {
+        query.origin.x = 100.0f + (FLOAT)i * WOW_WMO_ADT_SIZE;
+        ASSERT(CM_WowQueryGround(&query, &ground));
+        CM_WowWorldCacheSnapshot(&stats);
+        ASSERT(stats.loaded_tiles <= stats.capacity);
+        if (!i) {
+            ASSERT_EQ_INT((int)stats.wmo_instances, 1);
+            ASSERT_EQ_INT((int)stats.doodad_instances, 3);
+        }
+    }
+    ASSERT_EQ_INT((int)stats.loaded_tiles, 9);
+    ASSERT_EQ_INT((int)stats.valid_tiles, 9);
+    ASSERT_EQ_INT((int)stats.wmo_instances, 0);
+    ASSERT_EQ_INT((int)stats.doodad_instances, 0);
+    ASSERT(!CM_WowSweepWorld(&(WOWSWEEPQUERY){
+        .start = { 100.0f, 200.0f, 23.0f },
+        .displacement = { WOW_WMO_ADT_SIZE * 11.0f, 0.0f, 0.0f },
+        .radius = 0.25f, .height = 0.5f,
+    }, &trace));
+    ASSERT_EQ_FLOAT(trace.end.x, 100.0f + WOW_WMO_ADT_SIZE * 11.0f, 0.01f);
+    CM_WowWorldCacheSnapshot(&stats);
+    ASSERT_EQ_INT((int)stats.loaded_tiles, 9);
+    ASSERT(stats.wmo_instances <= 1);
+    ASSERT(stats.doodad_instances <= 3);
+
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    CM_WowWorldCacheSnapshot(&stats);
+    ASSERT_EQ_INT((int)stats.loaded_tiles, 0);
+    ASSERT_EQ_INT((int)stats.valid_tiles, 0);
+    query.origin = (VECTOR3){ 100.0f, 200.0f, 20.25f };
+    ASSERT(CM_WowQueryGround(&query, &ground));
+    CM_WowWorldCacheSnapshot(&stats);
+    ASSERT_EQ_INT((int)stats.wmo_instances, 1);
+    ASSERT_EQ_INT((int)stats.doodad_instances, 3);
+    if (game->Shutdown) game->Shutdown();
+    CM_WowWorldCacheSnapshot(&stats);
+    ASSERT_EQ_INT((int)stats.loaded_tiles, 0);
+    ASSERT_EQ_INT((int)stats.wmo_instances, 0);
+    ASSERT_EQ_INT((int)stats.doodad_instances, 0);
+}
+
 static void test_wow_wmo_world_query_handles_floors_ramp_walls_and_door(void) {
     struct game_export *game = init_game();
     WOWGROUNDQUERY ground_query = {
@@ -1609,7 +1665,7 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     ASSERT_STR_EQ(creature_local->animation->name, "Walk");
     ASSERT(creature_local->grounded);
 
-    game->RunFrame();
+    FOR_LOOP(i, BZ_WOW_AI_MEDIUM_UPDATE / FRAMETIME) game->RunFrame();
     ASSERT(fabsf(creature->s.origin2.x - before.x) > 0.001f ||
            fabsf(creature->s.origin2.y - before.y) > 0.001f);
     ASSERT_EQ_FLOAT(creature->s.origin.z,
@@ -2111,6 +2167,7 @@ static void test_wow_progress_round_trip_restores_rpg_state_not_transients(void)
     LPEDICT player, creature;
     wowEntityLocal_t *local, *creature_local;
     wowClient_t *client;
+    WOWWORLDCACHESTATS cache_before, cache_after;
 
     test_progress_path_enable();
     ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
@@ -2135,6 +2192,7 @@ static void test_wow_progress_round_trip_restores_rpg_state_not_transients(void)
     local->ability_cooldown[WOW_ABILITY_THROW] = 900;
     creature_local->ai_state = WOW_AI_AGGRO;
     creature_local->health = 1;
+    CM_WowWorldCacheSnapshot(&cache_before);
     ASSERT(Wow_SavePlayerProgress(player));
     ASSERT_EQ_INT(access(TEST_PROGRESS_PATH ".tmp", F_OK), -1);
 
@@ -2142,6 +2200,8 @@ static void test_wow_progress_round_trip_restores_rpg_state_not_transients(void)
     creature_local->ai_state = WOW_AI_EVADE;
     creature_local->health = 2;
     ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(player), WOW_PROGRESS_LOAD_OK);
+    CM_WowWorldCacheSnapshot(&cache_after);
+    ASSERT(!memcmp(&cache_before, &cache_after, sizeof(cache_before)));
     ASSERT_EQ_INT((int)local->level, 2);
     ASSERT_EQ_INT((int)local->xp, 123);
     ASSERT_EQ_INT((int)local->health, 77);
@@ -2356,6 +2416,7 @@ static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
 
 int main(void) {
     RUN_TEST(test_wow_ground_query_reads_artificial_adt);
+    RUN_TEST(test_wow_world_cache_stays_bounded_across_query_and_map_lifecycle);
     RUN_TEST(test_wow_wmo_world_query_handles_floors_ramp_walls_and_door);
     RUN_TEST(test_wow_camera_clamps_wall_and_preserves_door);
     RUN_TEST(test_wow_camera_handles_ceiling_terrain_and_corner);

@@ -450,12 +450,14 @@ BOOL Wow_SetEntityMove(LPEDICT ent, LPWOWMOVE move) {
 
 void Wow_AdvanceEntityFrame(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    DWORD msec;
     DWORD next_frame;
 
     if (!ent || !local || !local->animation) {
         return;
     }
-    next_frame = ent->s.frame + FRAMETIME;
+    msec = local->kind == WOW_ENTITY_CREATURE && local->update.step ? local->update.step : FRAMETIME;
+    next_frame = ent->s.frame + msec;
     if (ent->s.frame < local->animation->interval[0] ||
         ent->s.frame >= local->animation->interval[1] ||
         next_frame >= local->animation->interval[1]) {
@@ -1246,6 +1248,7 @@ static void Wow_Shutdown(void) {
     if (wow_edicts[0].inuse && wow_edicts[0].client)
         (void)Wow_AutoSavePlayerProgress(&wow_edicts[0]);
     if (CM_WowWorldProfileEnabled()) CM_WowWorldProfilePrint();
+    CM_WowWorldCacheReset();
     G_FreeModels();
     globals.edicts = NULL;
     globals.num_edicts = 0;

@@ -27,6 +27,14 @@ typedef struct {
 } WOWAIMOVEINPUT;
 typedef WOWAIMOVEINPUT const *LPCWOWAIMOVEINPUT;
 
+/* Budgeted creatures consume accumulated server milliseconds; direct/player calls retain the native frame step. */
+static DWORD Wow_AIFrameTime(LPCEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+    return local && local->kind == WOW_ENTITY_CREATURE && local->update.step
+        ? local->update.step : FRAMETIME;
+}
+
 /* Projectile damage belongs to its caster for retaliation, power gain, XP, and quest credit. */
 LPEDICT Wow_CombatOwner(LPEDICT attacker) {
     wowEntityLocal_t *local = Wow_EntityLocal(attacker);
@@ -256,7 +264,7 @@ static void Wow_AdvanceDeathFrame(LPEDICT ent, wowEntityLocal_t *local) {
         : local->animation->interval[0];
 
     if (ent->s.frame < end_frame) {
-        DWORD next_frame = ent->s.frame + FRAMETIME;
+        DWORD next_frame = ent->s.frame + Wow_AIFrameTime(ent);
         ent->s.frame = MIN(next_frame, end_frame);
     } else {
         ent->s.frame = end_frame;
@@ -381,6 +389,7 @@ void Wow_AIMove(LPEDICT ent) {
     VECTOR2 delta;
     FLOAT len;
     FLOAT step;
+    FLOAT seconds;
     VECTOR2 displacement;
 
     if (!ent || !local) {
@@ -397,9 +406,10 @@ void Wow_AIMove(LPEDICT ent) {
         return;
     }
 
-    step = MIN(local->walk_speed * ((FLOAT)FRAMETIME / 1000.0f), len);
+    seconds = (FLOAT)Wow_AIFrameTime(ent) / 1000.0f;
+    step = MIN(local->walk_speed * seconds, len);
     displacement = (VECTOR2){ delta.x * step / len, delta.y * step / len };
-    if (!Wow_MoveEntity(ent, &displacement, (FLOAT)FRAMETIME / 1000.0f)) {
+    if (!Wow_MoveEntity(ent, &displacement, seconds)) {
         Wow_SetStandMove(ent);
         return;
     }
@@ -515,6 +525,7 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker) {
 
 BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    DWORD msec = Wow_AIFrameTime(ent);
     BOOL finished;
 
     if (!ent || !local) {
@@ -523,9 +534,9 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
 
     if (local->dead) {
         if (local->death_time > 0) {
-            finished = local->death_time <= FRAMETIME;
-            if (local->death_time > FRAMETIME) {
-                local->death_time -= FRAMETIME;
+            finished = local->death_time <= msec;
+            if (local->death_time > msec) {
+                local->death_time -= msec;
             } else {
                 local->death_time = 0;
             }
@@ -541,9 +552,9 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
     }
 
     if (local->attack_damage_time > 0) {
-        finished = local->attack_damage_time <= FRAMETIME;
-        if (local->attack_damage_time > FRAMETIME) {
-            local->attack_damage_time -= FRAMETIME;
+        finished = local->attack_damage_time <= msec;
+        if (local->attack_damage_time > msec) {
+            local->attack_damage_time -= msec;
         } else {
             local->attack_damage_time = 0;
         }
@@ -565,9 +576,9 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
     }
 
     if (local->attack_backswing_time > 0) {
-        finished = local->attack_backswing_time <= FRAMETIME;
-        if (local->attack_backswing_time > FRAMETIME) {
-            local->attack_backswing_time -= FRAMETIME;
+        finished = local->attack_backswing_time <= msec;
+        if (local->attack_backswing_time > msec) {
+            local->attack_backswing_time -= msec;
         } else {
             local->attack_backswing_time = 0;
         }
@@ -587,9 +598,9 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
     }
 
     if (local->pain_time > 0) {
-        finished = local->pain_time <= FRAMETIME;
-        if (local->pain_time > FRAMETIME) {
-            local->pain_time -= FRAMETIME;
+        finished = local->pain_time <= msec;
+        if (local->pain_time > msec) {
+            local->pain_time -= msec;
         } else {
             local->pain_time = 0;
         }
@@ -657,10 +668,13 @@ static BOOL Wow_AIChooseSteer(LPEDICT ent, LPCVECTOR2 desired, FLOAT probe_dista
 static wowAiMoveResult_t Wow_AIMoveToward(LPEDICT ent, LPCWOWAIMOVEINPUT input) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
     VECTOR2 target, delta, direction, displacement, before, actual;
-    FLOAT distance, step, progress;
+    FLOAT distance, step, progress, seconds;
+    DWORD msec;
     BOOL recovering;
 
     if (!ent || !local || !input) return WOW_AI_MOVE_FAILED;
+    msec = Wow_AIFrameTime(ent);
+    seconds = (FLOAT)msec / 1000.0f;
     if (local->obstacle.state == WOW_AI_PATH_FAILED) return WOW_AI_MOVE_FAILED;
     recovering = local->obstacle.state == WOW_AI_PATH_RECOVER;
     target = recovering ? local->obstacle.last_valid : input->target;
@@ -676,16 +690,16 @@ static wowAiMoveResult_t Wow_AIMoveToward(LPEDICT ent, LPCWOWAIMOVEINPUT input) 
     direction = Vector2_scale(&delta, 1.0f / distance);
     if (local->obstacle.state == WOW_AI_PATH_STEER && local->obstacle.steer_time)
         direction = local->obstacle.steer;
-    step = MIN(input->speed * ((FLOAT)FRAMETIME / 1000.0f),
+    step = MIN(input->speed * seconds,
                MAX(0.0f, distance - (recovering ? 0.1f : input->stop_distance)));
     displacement = Vector2_scale(&direction, step);
     before = ent->s.origin2;
-    (void)Wow_MoveEntity(ent, &displacement, (FLOAT)FRAMETIME / 1000.0f);
+    (void)Wow_MoveEntity(ent, &displacement, seconds);
     actual = Vector2_sub(&ent->s.origin2, &before);
     progress = Vector2_len(&actual);
     if (local->obstacle.state == WOW_AI_PATH_STEER) {
-        local->obstacle.steer_time = local->obstacle.steer_time > FRAMETIME
-            ? local->obstacle.steer_time - FRAMETIME : 0;
+        local->obstacle.steer_time = local->obstacle.steer_time > msec
+            ? local->obstacle.steer_time - msec : 0;
         if (!local->obstacle.steer_time) local->obstacle.state = WOW_AI_PATH_DIRECT;
     }
     if (progress >= BZ_WOW_AI_PROGRESS_EPSILON) {
@@ -699,7 +713,7 @@ static wowAiMoveResult_t Wow_AIMoveToward(LPEDICT ent, LPCWOWAIMOVEINPUT input) 
         return WOW_AI_MOVE_MOVING;
     }
 
-    local->obstacle.stuck_time += FRAMETIME;
+    local->obstacle.stuck_time += msec;
     if (!recovering && local->obstacle.state != WOW_AI_PATH_STEER &&
         Wow_AIChooseSteer(ent, &direction, MAX(0.5f, step * 2.0f))) {
         local->obstacle.state = WOW_AI_PATH_STEER;
@@ -763,9 +777,11 @@ static void Wow_AIEnterEvade(LPEDICT ent) {
 }
 
 static void Wow_AIRegenerate(LPEDICT ent, wowEntityLocal_t *local) {
+    DWORD msec = Wow_AIFrameTime(ent);
+
     if (!ent || !local || local->health >= local->max_health) return;
-    if (local->regen_time > FRAMETIME) {
-        local->regen_time -= FRAMETIME;
+    if (local->regen_time > msec) {
+        local->regen_time -= msec;
         return;
     }
     local->regen_time = BZ_WOW_CREATURE_REGEN_TIME;
@@ -804,6 +820,8 @@ void Wow_AIRunFrame(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
     wowAiMoveResult_t move_result;
     FLOAT target_distance;
+    DWORD msec = Wow_AIFrameTime(ent);
+    FLOAT seconds = (FLOAT)msec / 1000.0f;
     BOOL can_attack;
 
     if (!ent || !local) {
@@ -815,7 +833,7 @@ void Wow_AIRunFrame(LPEDICT ent) {
         if (local->kind != WOW_ENTITY_CREATURE) return;
         if (local->ai_state == WOW_AI_DEAD && !local->death_time) local->ai_state = WOW_AI_RESPAWN;
         if (local->ai_state == WOW_AI_RESPAWN) {
-            if (local->respawn_time > FRAMETIME) local->respawn_time -= FRAMETIME;
+            if (local->respawn_time > msec) local->respawn_time -= msec;
             else Wow_AIRespawn(ent);
         }
         return;
@@ -842,12 +860,12 @@ void Wow_AIRunFrame(LPEDICT ent) {
             return;
         }
         if (local->patrol_radius <= 0.0f || local->walk_speed <= 0.0f) {
-            (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
+            (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, seconds);
             if (ent->idle) ent->idle(ent);
             Wow_AdvanceEntityFrame(ent);
             return;
         }
-        local->patrol_phase += ((FLOAT)FRAMETIME / 1000.0f) * 0.6f;
+        local->patrol_phase += seconds * 0.6f;
         if (ent->move) ent->move(ent);
         Wow_AdvanceEntityFrame(ent);
         return;
@@ -858,7 +876,7 @@ void Wow_AIRunFrame(LPEDICT ent) {
         return;
     }
     if (Wow_AIAdvanceLockedFrame(ent)) {
-        (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
+        (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, seconds);
         return;
     }
     target_distance = Wow_Distance2(&local->enemy->s.origin2, &ent->s.origin2);
@@ -877,19 +895,85 @@ void Wow_AIRunFrame(LPEDICT ent) {
     } else {
         local->ai_state = WOW_AI_ATTACK;
         Wow_AIResetNavigation(ent);
-        (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, (FLOAT)FRAMETIME / 1000.0f);
+        (void)Wow_MoveEntity(ent, &(VECTOR2){ 0.0f, 0.0f }, seconds);
         if (ent->attack) ent->attack(ent);
     }
     Wow_AdvanceEntityFrame(ent);
 }
 
-void Wow_RunCreatureFrame(LPEDICT ent) {
-    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+/* Combat and nearby interaction stay frame-rate; distant lifecycle work is deterministic and state-budgeted. */
+static wowAiUpdateRate_t Wow_AIUpdateRate(LPCEDICT ent, wowEntityLocal_t const *local) {
+    LPCEDICT player = &wow_edicts[0];
+    FLOAT distance;
 
-    if (!ent || !local || local->kind != WOW_ENTITY_CREATURE) {
+    if (local->dead) return WOW_AI_UPDATE_DEAD;
+    if (local->enemy || local->ai_state == WOW_AI_AGGRO || local->ai_state == WOW_AI_CHASE ||
+        local->ai_state == WOW_AI_ATTACK || local->attack_damage_time || local->attack_backswing_time ||
+        local->pain_time)
+        return WOW_AI_UPDATE_HIGH;
+    if (!Wow_EntityCanBeTargeted(player)) return WOW_AI_UPDATE_DORMANT;
+    distance = Wow_Distance2(&player->s.origin2, &ent->s.origin2);
+    if (distance <= BZ_WOW_CREATURE_AGGRO_RANGE ||
+        (local->quest_giver && distance <= BZ_WOW_QUEST_INTERACTION_RANGE))
+        return WOW_AI_UPDATE_HIGH;
+    if (local->ai_state == WOW_AI_EVADE || distance <= BZ_WOW_AI_NEAR_DISTANCE)
+        return WOW_AI_UPDATE_MEDIUM;
+    return local->patrol_radius > 0.0f && local->walk_speed > 0.0f
+        ? WOW_AI_UPDATE_LOW : WOW_AI_UPDATE_DORMANT;
+}
+
+/* One interval table makes every mutually-exclusive AI rate explicit and reviewable. */
+static DWORD Wow_AIUpdateInterval(wowAiUpdateRate_t rate) {
+    static DWORD const intervals[WOW_AI_UPDATE_COUNT] = {
+        [WOW_AI_UPDATE_HIGH] = FRAMETIME,
+        [WOW_AI_UPDATE_MEDIUM] = BZ_WOW_AI_MEDIUM_UPDATE,
+        [WOW_AI_UPDATE_LOW] = BZ_WOW_AI_LOW_UPDATE,
+        [WOW_AI_UPDATE_DEAD] = BZ_WOW_AI_DEAD_UPDATE,
+        [WOW_AI_UPDATE_DORMANT] = 0,
+    };
+
+    return rate < WOW_AI_UPDATE_COUNT ? intervals[rate] : 0;
+}
+
+void Wow_RunCreatureFrame(LPEDICT ent) {
+    static wowWorldProfileCounter_t const update_counters[WOW_AI_UPDATE_COUNT] = {
+        [WOW_AI_UPDATE_HIGH] = WOW_WORLD_PROFILE_AI_HIGH_UPDATES,
+        [WOW_AI_UPDATE_MEDIUM] = WOW_WORLD_PROFILE_AI_MEDIUM_UPDATES,
+        [WOW_AI_UPDATE_LOW] = WOW_WORLD_PROFILE_AI_LOW_UPDATES,
+        [WOW_AI_UPDATE_DEAD] = WOW_WORLD_PROFILE_AI_LOW_UPDATES,
+    };
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    wowAiUpdateRate_t rate;
+    DWORD interval;
+
+    if (!ent || !local || local->kind != WOW_ENTITY_CREATURE) return;
+    rate = Wow_AIUpdateRate(ent, local);
+    interval = Wow_AIUpdateInterval(rate);
+    if (local->update.rate >= WOW_AI_UPDATE_COUNT) {
+        local->update.rate = rate;
+        local->update.delay = rate == WOW_AI_UPDATE_LOW
+            ? ((ent->s.number ? ent->s.number - 1 : 0) * FRAMETIME) % interval + FRAMETIME : interval;
+    } else if (local->update.rate != rate) {
+        memset(&local->update, 0, sizeof(local->update));
+        local->update.delay = interval;
+        local->update.rate = rate;
+    }
+    if (rate == WOW_AI_UPDATE_DORMANT) {
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_AI_DORMANT_FRAMES, 1);
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_AI_DEFERRED_UPDATES, 1);
         return;
     }
-    if (ent->run) {
-        ent->run(ent);
+    local->update.elapsed = local->update.elapsed > ~0u - FRAMETIME
+        ? ~0u : local->update.elapsed + FRAMETIME;
+    local->update.delay = local->update.delay > FRAMETIME ? local->update.delay - FRAMETIME : 0;
+    if (local->update.delay) {
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_AI_DEFERRED_UPDATES, 1);
+        return;
     }
+    local->update.step = local->update.elapsed;
+    local->update.elapsed = 0;
+    local->update.delay = interval;
+    CM_WowWorldProfileAdd(update_counters[rate], 1);
+    if (ent->run) ent->run(ent);
+    local->update.step = 0;
 }

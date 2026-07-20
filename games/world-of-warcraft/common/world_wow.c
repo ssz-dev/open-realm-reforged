@@ -48,6 +48,30 @@ static char                 cm_wow_map_name[128]      = { 0 };
 static cmWowAdtHeightCache_t cm_wow_height_cache[CM_WOW_ADT_CACHE_SIZE];
 static DWORD                cm_wow_height_cache_stamp;
 
+/* Map reload and game shutdown share one release path for every tile-owned collision reference. */
+void CM_WowWorldCacheReset(void) {
+    FOR_LOOP(i, CM_WOW_ADT_CACHE_SIZE) CM_WowCollisionTileFree(&cm_wow_height_cache[i].collision);
+    CM_WowCollisionReset();
+    memset(cm_wow_height_cache, 0, sizeof(cm_wow_height_cache));
+    cm_wow_height_cache_stamp = 0;
+}
+
+/* Streaming telemetry exposes bounds and occupancy without leaking cache-owned pointers. */
+void CM_WowWorldCacheSnapshot(LPWOWWORLDCACHESTATS result) {
+    WOWWORLDCACHESTATS stats = { .capacity = CM_WOW_ADT_CACHE_SIZE };
+
+    FOR_LOOP(i, CM_WOW_ADT_CACHE_SIZE) {
+        cmWowAdtHeightCache_t const *cache = &cm_wow_height_cache[i];
+
+        if (!cache->loaded) continue;
+        stats.loaded_tiles++;
+        stats.valid_tiles += cache->valid;
+        stats.wmo_instances += cache->collision.instance_count;
+        stats.doodad_instances += cache->collision.doodad_instance_count;
+    }
+    if (result) *result = stats;
+}
+
 static DWORD CM_WowRead32(BYTE const *p) {
     return ((DWORD)p[0]) | ((DWORD)p[1] << 8) | ((DWORD)p[2] << 16) | ((DWORD)p[3] << 24);
 }
@@ -109,10 +133,7 @@ static void CM_WowSetMapPath(LPCSTR mapFilename) {
     LPCSTR base;
     size_t dir_len, name_len;
 
-    FOR_LOOP(i, CM_WOW_ADT_CACHE_SIZE) CM_WowCollisionTileFree(&cm_wow_height_cache[i].collision);
-    CM_WowCollisionReset();
-    memset(cm_wow_height_cache, 0, sizeof(cm_wow_height_cache));
-    cm_wow_height_cache_stamp = 0;
+    CM_WowWorldCacheReset();
     cm_wow_map_dir[0]  = '\0';
     cm_wow_map_name[0] = '\0';
 

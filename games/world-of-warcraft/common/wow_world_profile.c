@@ -87,7 +87,8 @@ void CM_WowWorldProfilePrint(void) {
             "  WMO candidates=%llu instances=%llu groups=%llu triangles=%llu (%.2f/sweep) peak=%llu/%llu\n"
             "  doodad candidates=%llu instances=%llu triangles=%llu hits=%llu\n"
             "  camera=%llu clamp=%llu LOS=%llu blocked=%llu projectile=%llu wall=%llu\n"
-            "  steering=%llu recover=%llu evade=%llu distance=%llu\n",
+            "  steering=%llu recover=%llu evade=%llu distance=%llu\n"
+            "  AI updates high=%llu medium=%llu low=%llu deferred=%llu dormant=%llu\n",
             (unsigned)cm_wow_world_profile.enabled,
             c[WOW_WORLD_PROFILE_GROUND_QUERIES], c[WOW_WORLD_PROFILE_TERRAIN_CHUNK_LOOKUPS],
             c[WOW_WORLD_PROFILE_TERRAIN_LRU_HITS], c[WOW_WORLD_PROFILE_TERRAIN_LRU_MISSES], miss_percent,
@@ -102,7 +103,10 @@ void CM_WowWorldProfilePrint(void) {
             c[WOW_WORLD_PROFILE_LOS_QUERIES], c[WOW_WORLD_PROFILE_BLOCKED_LOS_QUERIES],
             c[WOW_WORLD_PROFILE_PROJECTILE_SWEEPS], c[WOW_WORLD_PROFILE_PROJECTILE_WALL_HITS],
             c[WOW_WORLD_PROFILE_AI_STEERING_PROBES], c[WOW_WORLD_PROFILE_STUCK_RECOVERIES],
-            c[WOW_WORLD_PROFILE_EVADE_FALLBACKS], c[WOW_WORLD_PROFILE_DISTANCE_REJECTS]);
+            c[WOW_WORLD_PROFILE_EVADE_FALLBACKS], c[WOW_WORLD_PROFILE_DISTANCE_REJECTS],
+            c[WOW_WORLD_PROFILE_AI_HIGH_UPDATES], c[WOW_WORLD_PROFILE_AI_MEDIUM_UPDATES],
+            c[WOW_WORLD_PROFILE_AI_LOW_UPDATES], c[WOW_WORLD_PROFILE_AI_DEFERRED_UPDATES],
+            c[WOW_WORLD_PROFILE_AI_DORMANT_FRAMES]);
 
     if (!cm_wow_world_profile.enabled) return;
     if (!cm_wow_world_profile.budget_valid &&

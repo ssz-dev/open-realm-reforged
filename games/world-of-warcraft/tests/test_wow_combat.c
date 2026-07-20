@@ -29,6 +29,8 @@ static animation_t g_death_anim = {
 };
 
 static DWORD g_pain_calls = 0;
+static DWORD g_ground_query_calls;
+static DWORD g_world_sweep_calls;
 static wowClient_t g_player_client;
 static BOOL g_ground_enabled = true;
 static FLOAT g_ground_slope_x;
@@ -47,6 +49,7 @@ void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD val
 BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     FLOAT height;
 
+    g_ground_query_calls++;
     if (!g_ground_enabled || !query || !result) return false;
     height = 7.0f + g_ground_slope_x * query->origin.x;
     if (height < query->origin.z - query->max_down || height > query->origin.z + query->max_up)
@@ -63,6 +66,7 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
 BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
     FLOAT length;
 
+    g_world_sweep_calls++;
     if (!query || !result) return false;
     *result = (WOWSWEEPRESULT){
         .end = Vector3_add(&query->start, &query->displacement),
@@ -177,6 +181,8 @@ static void test_reset_world(void) {
     memset(wow_entity_locals, 0, sizeof(wow_entity_locals));
     memset(&g_player_client, 0, sizeof(g_player_client));
     g_pain_calls = 0;
+    g_ground_query_calls = 0;
+    g_world_sweep_calls = 0;
     g_ground_enabled = true;
     g_ground_slope_x = 0.0f;
     g_world_mode = TEST_WORLD_CLEAR;
@@ -833,6 +839,105 @@ static void test_wow_creature_respawn_defers_without_ground(void) {
     ASSERT_EQ_FLOAT(creature->s.origin.z, before.z, 0.001f);
 }
 
+/* Production scheduling wakes combat immediately while dormant and distant idle states avoid world queries. */
+static void test_wow_creature_scheduler_budgets_state_rates(void) {
+    LPEDICT player, creature;
+    wowEntityLocal_t *local;
+    WOWWORLDPROFILE profile;
+    VECTOR2 before;
+
+    test_prepare_player_creature(&player, &creature);
+    local = Wow_EntityLocal(creature);
+    player->s.origin.x = player->s.origin2.x = 100.0f;
+    local->patrol_radius = local->walk_speed = 0.0f;
+    local->update.rate = WOW_AI_UPDATE_COUNT;
+    CM_WowWorldProfileInit(true);
+    FOR_LOOP(i, 20) Wow_RunCreatureFrame(creature);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_DORMANT_FRAMES], 20);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_DEFERRED_UPDATES], 20);
+    ASSERT_EQ_INT((int)g_ground_query_calls, 0);
+    ASSERT_EQ_INT((int)g_world_sweep_calls, 0);
+
+    local->patrol_radius = local->walk_speed = 2.0f;
+    before = creature->s.origin2;
+    FOR_LOOP(i, BZ_WOW_AI_LOW_UPDATE / FRAMETIME) Wow_RunCreatureFrame(creature);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_LOW_UPDATES], 1);
+    ASSERT(g_ground_query_calls > 0);
+    ASSERT(g_world_sweep_calls > 0);
+    ASSERT(Wow_Distance2(&before, &creature->s.origin2) > 0.1f);
+
+    player->s.origin.x = player->s.origin2.x = 20.0f;
+    FOR_LOOP(i, BZ_WOW_AI_MEDIUM_UPDATE / FRAMETIME) Wow_RunCreatureFrame(creature);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_MEDIUM_UPDATES], 1);
+    player->s.origin.x = player->s.origin2.x = 10.0f;
+    Wow_RunCreatureFrame(creature);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_HIGH_UPDATES], 1);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_AGGRO);
+    ASSERT(local->enemy == player);
+    CM_WowWorldProfileEnable(false);
+}
+
+/* High-rate combat keeps the existing millisecond damage point under the scheduler boundary. */
+static void test_wow_budgeted_attack_timing_remains_server_time(void) {
+    LPEDICT player, creature;
+    wowEntityLocal_t *player_local, *local;
+    WOWWORLDPROFILE profile;
+
+    test_prepare_player_creature(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    local = Wow_EntityLocal(creature);
+    creature->s.origin.x = creature->s.origin2.x = 4.0f;
+    local->home = creature->s.origin2;
+    local->enemy = player;
+    local->ai_state = WOW_AI_ATTACK;
+    local->update.rate = WOW_AI_UPDATE_COUNT;
+    creature->attack(creature);
+    CM_WowWorldProfileInit(true);
+    Wow_RunCreatureFrame(creature);
+    ASSERT_EQ_INT((int)player_local->health, BZ_WOW_PLAYER_BASE_HEALTH);
+    Wow_RunCreatureFrame(creature);
+    ASSERT_EQ_INT((int)player_local->health, BZ_WOW_PLAYER_BASE_HEALTH - 1);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_HIGH_UPDATES], 2);
+    CM_WowWorldProfileEnable(false);
+}
+
+/* Dead lifecycle work advances on accumulated server time and performs no sweep before the respawn transition. */
+static void test_wow_budgeted_respawn_remains_time_based_without_dead_sweeps(void) {
+    LPEDICT player, creature;
+    wowEntityLocal_t *local;
+    WOWWORLDPROFILE profile;
+
+    test_prepare_player_creature(&player, &creature);
+    (void)player;
+    local = Wow_EntityLocal(creature);
+    local->dead = true;
+    local->health = 0;
+    local->ai_state = WOW_AI_RESPAWN;
+    local->death_time = 0;
+    local->respawn_time = BZ_WOW_CREATURE_RESPAWN_TIME;
+    local->update.rate = WOW_AI_UPDATE_COUNT;
+    CM_WowWorldProfileInit(true);
+    FOR_LOOP(i, BZ_WOW_CREATURE_RESPAWN_TIME / FRAMETIME - 1) Wow_RunCreatureFrame(creature);
+    ASSERT(local->dead);
+    ASSERT_EQ_INT((int)g_ground_query_calls, 0);
+    ASSERT_EQ_INT((int)g_world_sweep_calls, 0);
+    Wow_RunCreatureFrame(creature);
+    ASSERT(!local->dead);
+    ASSERT(g_ground_query_calls > 0);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_LOW_UPDATES],
+                  BZ_WOW_CREATURE_RESPAWN_TIME / BZ_WOW_AI_DEAD_UPDATE);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_AI_DEFERRED_UPDATES],
+                  BZ_WOW_CREATURE_RESPAWN_TIME / FRAMETIME -
+                      BZ_WOW_CREATURE_RESPAWN_TIME / BZ_WOW_AI_DEAD_UPDATE);
+    CM_WowWorldProfileEnable(false);
+}
+
 int main(void) {
     RUN_TEST(test_wow_attack_applies_damage_after_damage_point);
     RUN_TEST(test_wow_attack_uses_explicit_timing_over_animation_split);
@@ -856,5 +961,8 @@ int main(void) {
     RUN_TEST(test_wow_blocked_creature_recovers_then_evades_without_teleport);
     RUN_TEST(test_wow_creature_death_awards_once_and_respawns_clean);
     RUN_TEST(test_wow_creature_respawn_defers_without_ground);
+    RUN_TEST(test_wow_creature_scheduler_budgets_state_rates);
+    RUN_TEST(test_wow_budgeted_attack_timing_remains_server_time);
+    RUN_TEST(test_wow_budgeted_respawn_remains_time_based_without_dead_sweeps);
     TEST_RESULTS();
 }

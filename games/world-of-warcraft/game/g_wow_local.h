@@ -39,6 +39,10 @@
 #define BZ_WOW_AI_STUCK_TIME 1000
 /* 700 ms returned to the direct vector before a creature could clear a normal WMO wall edge. */
 #define BZ_WOW_AI_STEER_TIME 2400
+#define BZ_WOW_AI_MEDIUM_UPDATE 200
+#define BZ_WOW_AI_LOW_UPDATE 1000
+#define BZ_WOW_AI_DEAD_UPDATE 500
+#define BZ_WOW_AI_NEAR_DISTANCE (BZ_WOW_CREATURE_AGGRO_RANGE * 2.0f)
 #define BZ_WOW_AI_LAST_VALID_DISTANCE 1.5f
 #define BZ_WOW_AI_PROGRESS_EPSILON 0.025f
 #define BZ_WOW_AI_LOS_RADIUS 0.05f
@@ -94,6 +98,15 @@ typedef enum {
     WOW_AI_DEAD,
     WOW_AI_RESPAWN,
 } wowAiState_t;
+
+typedef enum {
+    WOW_AI_UPDATE_HIGH,
+    WOW_AI_UPDATE_MEDIUM,
+    WOW_AI_UPDATE_LOW,
+    WOW_AI_UPDATE_DEAD,
+    WOW_AI_UPDATE_DORMANT,
+    WOW_AI_UPDATE_COUNT,
+} wowAiUpdateRate_t;
 
 typedef enum {
     WOW_AI_PATH_DIRECT,
@@ -295,6 +308,12 @@ typedef struct {
         SHORT steer_sign;
         BYTE recoveries;
     } obstacle;
+    struct {
+        DWORD elapsed;
+        DWORD delay;
+        DWORD step;
+        wowAiUpdateRate_t rate;
+    } update;
     DWORD attack_damage;
     DWORD attack_damage_point;
     DWORD attack_backswing;

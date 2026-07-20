@@ -139,6 +139,50 @@ has no stable sub-frame timer; the server clock advances per frame, so this
 profiler deliberately records work counts rather than misleading per-query
 durations.
 
+### World Streaming and AI Budgets
+
+Loaded, visible, physically relevant, and AI-active are separate scopes:
+
+- the renderer owns a camera-centered `3x3` ADT draw window and still culls
+  chunks, WMO groups, and doodads inside it;
+- gameplay collision owns an independent nine-tile LRU populated only by
+  ground and sweep queries, so a neighboring physical tile can stay resident
+  without being visible;
+- creature entities remain server-owned across both windows, but their update
+  rate depends on combat state and player distance;
+- projectiles remain frame-rate entities because every flight segment must
+  sweep collision before damage can be awarded.
+
+Creature scheduling uses one state rate and one accumulated-millisecond step:
+
+| Rate | Interval | States |
+| --- | ---: | --- |
+| High | `100 ms` | aggro, chase, attack, pain/cast locks, aggro range, active quest interaction |
+| Medium | `200 ms` | evade/return and nearby idle |
+| Low | `1000 ms` | distant moving patrol |
+| Dead | `500 ms` | death/respawn lifecycle |
+| Dormant | none | distant stationary idle or no valid player |
+
+Rate transitions discard the old state's partial interval, preventing a
+distant idle budget from becoming an immediate oversized combat step. Due
+updates consume the actual accumulated server milliseconds for movement,
+animation, attack locks, regeneration, and respawn; player cooldowns and
+projectile flight continue to advance every server frame. Dormant frames and
+deferred dead frames perform no movement query.
+
+The collision LRU is allocation-bounded at nine ADTs. Each slot owns its WMO
+and verified doodad references, and eviction frees those references only after
+the current tile operation has completed. Map load/reload and shutdown free all
+slot-owned collision data and reset the shared model cache. Player save/load
+does not touch world caches. `CM_WowWorldCacheSnapshot` exposes only capacity
+and aggregate occupancy for deterministic lifecycle tests; it never exposes a
+cache-owned pointer.
+
+The profiler summary includes high, medium, low, deferred, and dormant AI
+counts beside query totals. This makes a bounded capture show whether lower
+query volume came from legitimate state budgeting rather than skipped combat
+or projectile work.
+
 ### Camera Collision
 
 OpenWoW derives the camera anchor from the interpolated authoritative player

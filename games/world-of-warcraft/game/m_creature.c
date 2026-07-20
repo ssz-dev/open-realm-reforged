@@ -204,6 +204,7 @@ static void Wow_MonsterStart(LPEDICT ent,
     local->attack_damage = BZ_WOW_CREATURE_ATTACK_DAMAGE;
     local->attack_damage_point = 250;
     local->attack_backswing = 450;
+    local->update.rate = WOW_AI_UPDATE_COUNT;
     ent->svflags |= SVF_MONSTER;
     ent->s.renderfx |= RF_HOSTILE;
     ent->idle = Wow_AIIdle;
