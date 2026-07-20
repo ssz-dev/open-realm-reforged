@@ -2,6 +2,7 @@
 #define G_WOW_LOCAL_H
 
 #include "server/server.h"
+#include "common/wow_camera_wow.h"
 #include "common/wow_world_query.h"
 #include "common/wow_ui_shared.h"
 #include "common/ui_constants.h"

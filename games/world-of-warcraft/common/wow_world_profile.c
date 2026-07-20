@@ -84,7 +84,8 @@ void CM_WowWorldProfilePrint(void) {
     fprintf(stderr,
             "OpenWoW world profile: enabled=%u ground=%llu chunk=%llu hit=%llu miss=%llu (%.2f%%) sweeps=%llu\n"
             "  WMO candidates=%llu instances=%llu groups=%llu triangles=%llu (%.2f/sweep) peak=%llu/%llu\n"
-            "  LOS=%llu blocked=%llu projectile=%llu wall=%llu steering=%llu recover=%llu evade=%llu distance=%llu\n",
+            "  camera=%llu clamp=%llu LOS=%llu blocked=%llu projectile=%llu wall=%llu\n"
+            "  steering=%llu recover=%llu evade=%llu distance=%llu\n",
             (unsigned)cm_wow_world_profile.enabled,
             c[WOW_WORLD_PROFILE_GROUND_QUERIES], c[WOW_WORLD_PROFILE_TERRAIN_CHUNK_LOOKUPS],
             c[WOW_WORLD_PROFILE_TERRAIN_LRU_HITS], c[WOW_WORLD_PROFILE_TERRAIN_LRU_MISSES], miss_percent,
@@ -92,6 +93,7 @@ void CM_WowWorldProfilePrint(void) {
             c[WOW_WORLD_PROFILE_WMO_INSTANCE_TESTS], c[WOW_WORLD_PROFILE_WMO_GROUP_TESTS],
             c[WOW_WORLD_PROFILE_TRIANGLE_TESTS], triangles_per_sweep,
             c[WOW_WORLD_PROFILE_MAX_CANDIDATES], c[WOW_WORLD_PROFILE_MAX_ITERATIONS],
+            c[WOW_WORLD_PROFILE_CAMERA_SWEEPS], c[WOW_WORLD_PROFILE_CAMERA_CLAMPS],
             c[WOW_WORLD_PROFILE_LOS_QUERIES], c[WOW_WORLD_PROFILE_BLOCKED_LOS_QUERIES],
             c[WOW_WORLD_PROFILE_PROJECTILE_SWEEPS], c[WOW_WORLD_PROFILE_PROJECTILE_WALL_HITS],
             c[WOW_WORLD_PROFILE_AI_STEERING_PROBES], c[WOW_WORLD_PROFILE_STUCK_RECOVERIES],

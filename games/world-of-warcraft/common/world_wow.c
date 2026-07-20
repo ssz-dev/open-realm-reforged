@@ -28,6 +28,14 @@ typedef struct {
 } cmWowAdtHeightCache_t;
 
 typedef struct {
+    cmWowChunkHeight_t const *chunk;
+    LPCWOWSWEEPQUERY query;
+    int row;
+    int col;
+} CMWOWTERRAINCELLSWEEP;
+typedef CMWOWTERRAINCELLSWEEP const *LPCCMWOWTERRAINCELLSWEEP;
+
+typedef struct {
     DWORD id;
     DWORD map_id;
     VECTOR3 position;
@@ -579,7 +587,67 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     return found;
 }
 
-/* Sweeps visit only overlapped ADT cache entries and keep earliest WMO contact across tile edges. */
+/* Four native MCVT triangles preserve the exact terrain cell shape for camera sweeps. */
+static BOOL CM_WowSweepTerrainCell(LPCCMWOWTERRAINCELLSWEEP sweep, LPWOWSWEEPRESULT result) {
+    cmWowChunkHeight_t const *chunk = sweep->chunk;
+    int base = sweep->row * 17 + sweep->col;
+    FLOAT x = chunk->position.x - (FLOAT)sweep->row * CM_WOW_ADT_UNIT_SIZE;
+    FLOAT y = chunk->position.y - (FLOAT)sweep->col * CM_WOW_ADT_UNIT_SIZE;
+    FLOAT z = chunk->position.z;
+    VECTOR3 tl = { x, y, z + chunk->heights[base] };
+    VECTOR3 tr = { x, y - CM_WOW_ADT_UNIT_SIZE, z + chunk->heights[base + 1] };
+    VECTOR3 bl = { x - CM_WOW_ADT_UNIT_SIZE, y, z + chunk->heights[base + 17] };
+    VECTOR3 br = { x - CM_WOW_ADT_UNIT_SIZE, y - CM_WOW_ADT_UNIT_SIZE, z + chunk->heights[base + 18] };
+    VECTOR3 center = {
+        x - CM_WOW_ADT_UNIT_SIZE * 0.5f,
+        y - CM_WOW_ADT_UNIT_SIZE * 0.5f,
+        z + chunk->heights[base + 9],
+    };
+    CMWOWTRIANGLE triangles[] = {
+        { center, tl, bl }, { center, tr, tl }, { center, br, tr }, { center, bl, br },
+    };
+    BOOL hit = false;
+
+    FOR_LOOP(i, 4) {
+        CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TRIANGLE_TESTS, 1);
+        hit |= CM_WowCollisionSweepTriangle(&(CMWOWTRIANGLESWEEP){
+            .query = sweep->query, .triangle = triangles[i], .surface = WOW_SURFACE_TERRAIN,
+        }, result);
+    }
+    return hit;
+}
+
+/* Direct chunk/cell ranges keep camera terrain traces bounded to their swept footprint. */
+static BOOL CM_WowSweepTerrainTile(cmWowAdtHeightCache_t const *cache,
+                                   LPCWOWSWEEPQUERY query,
+                                   LPWOWSWEEPRESULT result) {
+    WOWBOX bounds = CM_WowCollisionSweepBounds(query);
+    BOOL hit = false;
+
+    FOR_LOOP(chunk_row, 16) {
+        FOR_LOOP(chunk_col, 16) {
+            cmWowChunkHeight_t const *chunk = &cache->chunks[chunk_row][chunk_col];
+            int min_row, max_row, min_col, max_col;
+
+            if (!chunk->has_heights ||
+                bounds.max.x < chunk->position.x - CM_WOW_ADT_CHUNK_SIZE ||
+                bounds.min.x > chunk->position.x ||
+                bounds.max.y < chunk->position.y - CM_WOW_ADT_CHUNK_SIZE ||
+                bounds.min.y > chunk->position.y)
+                continue;
+            min_row = MAX(0, (int)floorf((chunk->position.x - bounds.max.x) / CM_WOW_ADT_UNIT_SIZE));
+            max_row = MIN(7, (int)floorf((chunk->position.x - bounds.min.x) / CM_WOW_ADT_UNIT_SIZE));
+            min_col = MAX(0, (int)floorf((chunk->position.y - bounds.max.y) / CM_WOW_ADT_UNIT_SIZE));
+            max_col = MIN(7, (int)floorf((chunk->position.y - bounds.min.y) / CM_WOW_ADT_UNIT_SIZE));
+            for (int row = min_row; row <= max_row; row++)
+                for (int col = min_col; col <= max_col; col++)
+                    hit |= CM_WowSweepTerrainCell(&(CMWOWTERRAINCELLSWEEP){ chunk, query, row, col }, result);
+        }
+    }
+    return hit;
+}
+
+/* Sweeps visit only overlapped ADT entries; camera mode adds terrain and all WMO surface orientations. */
 BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
     VECTOR3 end;
     int min_tile_x, max_tile_x, min_tile_y, max_tile_y;
@@ -606,8 +674,12 @@ BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
     min_tile_x = MAX(0, min_tile_x); max_tile_x = MIN(63, max_tile_x);
     min_tile_y = MAX(0, min_tile_y); max_tile_y = MIN(63, max_tile_y);
     for (int tile_y = min_tile_y; tile_y <= max_tile_y; tile_y++)
-        for (int tile_x = min_tile_x; tile_x <= max_tile_x; tile_x++)
-            hit |= CM_WowCollisionSweepTile(&CM_WowHeightCache(tile_x, tile_y)->collision, query, result);
+        for (int tile_x = min_tile_x; tile_x <= max_tile_x; tile_x++) {
+            cmWowAdtHeightCache_t *cache = CM_WowHeightCache(tile_x, tile_y);
+
+            if (query->mode == WOW_SWEEP_CAMERA) hit |= CM_WowSweepTerrainTile(cache, query, result);
+            hit |= CM_WowCollisionSweepTile(&cache->collision, query, result);
+        }
     result->end = Vector3_mad(&query->start, result->fraction, &query->displacement);
     CM_WowWorldProfileEndQuery();
     return hit;

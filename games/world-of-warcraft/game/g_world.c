@@ -7,6 +7,7 @@
 #include "common/wow_world_profile.c"
 #include "common/wow_collision_wow.c"
 #include "common/world_wow.c"
+#include "common/wow_camera_wow.c"
 
 #undef FS_ReadFile
 #undef FS_FreeFile

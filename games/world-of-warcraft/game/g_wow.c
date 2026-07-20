@@ -50,6 +50,7 @@ static struct {
     .pitch = 328.0f,
     .distance = 8.5f,
 };
+static WOWCAMERASTATE wow_camera;
 
 static wowHudIcon_t const wow_start_actions[WOW_UI_ACTION_SLOTS] = { 0 };
 
@@ -860,15 +861,27 @@ static BOOL Wow_UpdateActionHud(LPEDICT ent) {
     return changed;
 }
 
+/* The server resolves static occlusion before publishing the camera distance in player state. */
 static void Wow_UpdateCamera(LPEDICT ent) {
+    VECTOR3 viewangles;
+    VECTOR3 anchor;
+
     if (!ent || !ent->client) {
         return;
     }
+    viewangles = (VECTOR3){ Wow_ViewPitch(wow_move.pitch), wow_move.yaw, 0.0f };
+    anchor = (VECTOR3){ ent->s.origin.x, ent->s.origin.y, ent->s.origin.z + BZ_WOW_CAMERA_ANCHOR_HEIGHT };
     ent->client->ps.origin = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
-    ent->client->ps.viewangles = (VECTOR3){ Wow_ViewPitch(wow_move.pitch), wow_move.yaw, 0.0f };
+    ent->client->ps.viewangles = viewangles;
     ent->client->ps.viewquat = Quaternion_fromEuler(&MAKE(VECTOR3, wow_move.pitch, 0.0f, wow_move.yaw), ROTATE_ZYX);
     ent->client->ps.fov = 45.0f;
-    ent->client->ps.distance = wow_move.distance;
+    /* Camera-only collision reuses static world geometry and never mutates the authoritative entity position. */
+    ent->client->ps.distance = Wow_CameraUpdate(&wow_camera, &(WOWCAMERAUPDATE){
+        .anchor = anchor,
+        .viewangles = viewangles,
+        .desired_distance = wow_move.distance,
+        .seconds = (FLOAT)FRAMETIME / 1000.0f,
+    });
 }
 
 static void Wow_UpdatePlayerHud(LPEDICT ent) {
@@ -1200,11 +1213,7 @@ static void Wow_InitPlayer(LPEDICT ent) {
     }
     fprintf(stderr, "WoW: action bar initialized — 1 Strike, 2 Heavy Strike, 3 Throw\n");
 #ifdef WOW
-    ps->origin = wow_spawn_origin;
-    ps->viewangles = (VECTOR3){ Wow_ViewPitch(wow_move.pitch), wow_move.yaw, 0.0f };
-    ps->viewquat = Quaternion_fromEuler(&MAKE(VECTOR3, wow_move.pitch, 0.0f, wow_move.yaw), ROTATE_ZYX);
-    ps->fov = 45;
-    ps->distance = wow_move.distance;
+    Wow_UpdateCamera(ent);
 #else
     ps->origin = wow_spawn_origin;
     ps->viewquat = Quaternion_fromEuler(&MAKE(VECTOR3, 326.0f, 0.0f, 0.0f), ROTATE_ZYX);
@@ -1370,6 +1379,7 @@ static void Wow_SpawnEntities(void) {
     wow_move.yaw = 0.0f;
     wow_move.pitch = 328.0f;
     wow_move.distance = 8.5f;
+    Wow_CameraReset(&wow_camera, wow_move.distance);
     Wow_InitPlayer(&wow_edicts[0]);
     globals.num_edicts = WOW_MAX_CLIENTS;
     Wow_SpawnAmbientCreatures(&wow_spawn_origin);

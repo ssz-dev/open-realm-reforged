@@ -107,6 +107,27 @@ all query results unchanged. The shared query layer has no stable sub-frame
 timer; the server clock advances per frame, so this profiler deliberately
 records work counts rather than misleading per-query durations.
 
+### Camera Collision
+
+OpenWoW derives the camera anchor from the interpolated authoritative player
+entity, including its Z coordinate. Reconstructing Z from terrain is incorrect
+inside WMOs and on stacked floors. The server keeps three distinct distances:
+
+- the player's desired distance,
+- the distance currently allowed by static collision,
+- the rate-limited visual distance published in `playerState_t`.
+
+`Wow_CameraUpdate` sweeps a `0.25`-radius sphere from `0.9` units behind the
+anchor through the same `CM_WowSweepWorld` path used by movement, LOS, and
+projectiles. Camera mode tests native MCVT terrain triangles and every WMO
+triangle orientation, including walls, floors, and ceilings; dynamic entities
+do not block it. Contact contracts immediately for safety, while normal
+snapshot interpolation smooths the rendered result. Release uses hysteresis,
+frame-time-independent exponential response, and an `8` unit/second maximum
+return speed. Camera state never changes the authoritative player position or
+the stored desired distance. The profiler summary exposes camera sweep and
+clamp totals for bounded real-client captures.
+
 ## Doodads And WMOs
 
 ADT object rendering remains renderer-owned:

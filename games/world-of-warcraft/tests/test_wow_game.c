@@ -913,6 +913,133 @@ static void test_wow_wmo_world_query_handles_floors_ramp_walls_and_door(void) {
     if (game->Shutdown) game->Shutdown();
 }
 
+/* The camera sphere shares WMO narrowphase, so walls clamp while the authored doorway stays open. */
+static void test_wow_camera_clamps_wall_and_preserves_door(void) {
+    struct game_export *game = init_game();
+    WOWCAMERASTATE wall, door;
+    WOWCAMERAUPDATE input = {
+        .anchor = { 100.0f, 190.0f, 23.6f },
+        .viewangles = { 0.0f, 180.0f, 0.0f },
+        .desired_distance = 20.0f,
+        .seconds = 0.1f,
+    };
+    VECTOR3 anchor = input.anchor;
+    WOWWORLDPROFILE profile;
+
+    test_wmo_fixture_enabled = true;
+    test_wmo_bsp_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    CM_WowWorldProfileEnable(true);
+    CM_WowWorldProfileReset();
+    Wow_CameraReset(&wall, input.desired_distance);
+    ASSERT(Wow_CameraUpdate(&wall, &input) < input.desired_distance);
+    ASSERT(wall.blocked);
+    ASSERT(wall.allowed_distance > 8.0f && wall.allowed_distance < 10.0f);
+    ASSERT_EQ_FLOAT(wall.visual_distance, wall.allowed_distance, 0.001f);
+    ASSERT_EQ_FLOAT(wall.desired_distance, 20.0f, 0.001f);
+    ASSERT_EQ_FLOAT(input.anchor.x, anchor.x, 0.001f);
+    ASSERT_EQ_FLOAT(input.anchor.y, anchor.y, 0.001f);
+    ASSERT_EQ_FLOAT(input.anchor.z, anchor.z, 0.001f);
+
+    input.anchor.y = 200.0f;
+    input.desired_distance = 15.0f;
+    Wow_CameraReset(&door, input.desired_distance);
+    ASSERT_EQ_FLOAT(Wow_CameraUpdate(&door, &input), 15.0f, 0.001f);
+    ASSERT(!door.blocked);
+    ASSERT_EQ_FLOAT(door.allowed_distance, door.desired_distance, 0.001f);
+    CM_WowWorldProfileSnapshot(&profile);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_CAMERA_SWEEPS], 2);
+    ASSERT_EQ_INT((int)profile.counters[WOW_WORLD_PROFILE_CAMERA_CLAMPS], 1);
+    CM_WowWorldProfileEnable(false);
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Full-orientation WMO and terrain triangles cover indoor roofs, slopes, and edge contacts without NaNs. */
+static void test_wow_camera_handles_ceiling_terrain_and_corner(void) {
+    struct game_export *game = init_game();
+    WOWCAMERASTATE ceiling, terrain, corner;
+    WOWCAMERAUPDATE input = {
+        .anchor = { 100.0f, 200.0f, 26.6f },
+        .viewangles = { 32.0f, 180.0f, 0.0f },
+        .desired_distance = 20.0f,
+        .seconds = 0.1f,
+    };
+    VECTOR3 forward, direction, eye;
+
+    test_wmo_fixture_enabled = true;
+    test_wmo_bsp_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    ASSERT_EQ_FLOAT(Wow_CameraAnchorZ(22.0f, 25.0f, 1.0f), 26.6f, 0.001f);
+    ASSERT_EQ_FLOAT(Wow_CameraAnchorZ(22.0f, 25.0f, 0.5f), 25.1f, 0.001f);
+    Wow_CameraReset(&ceiling, input.desired_distance);
+    ASSERT(Wow_CameraUpdate(&ceiling, &input) < input.desired_distance);
+    ASSERT(ceiling.blocked);
+    forward = Wow_CameraForward(&input.viewangles);
+    direction = Vector3_scale(&forward, -ceiling.visual_distance);
+    eye = Vector3_add(&input.anchor, &direction);
+    ASSERT(isfinite(eye.x) && isfinite(eye.y) && isfinite(eye.z));
+    ASSERT(eye.z <= 30.0f - BZ_WOW_CAMERA_RADIUS + 0.01f);
+
+    input.anchor = (VECTOR3){ 100.0f, 200.0f, 21.6f };
+    input.viewangles = (VECTOR3){ -30.0f, 0.0f, 0.0f };
+    input.desired_distance = 10.0f;
+    Wow_CameraReset(&terrain, input.desired_distance);
+    ASSERT(Wow_CameraUpdate(&terrain, &input) < input.desired_distance);
+    ASSERT(terrain.blocked);
+
+    input.anchor = (VECTOR3){ 100.0f, 194.9f, 23.6f };
+    input.viewangles = (VECTOR3){ 0.0f, 180.0f, 0.0f };
+    input.desired_distance = 20.0f;
+    Wow_CameraReset(&corner, input.desired_distance);
+    (void)Wow_CameraUpdate(&corner, &input);
+    ASSERT(isfinite(corner.allowed_distance));
+    ASSERT(isfinite(corner.visual_distance));
+    ASSERT(corner.visual_distance >= BZ_WOW_CAMERA_TRACE_START);
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Release hysteresis and a rate-limited exponential return are stable across different frame steps. */
+static void test_wow_camera_returns_smoothly_with_hysteresis(void) {
+    struct game_export *game = init_game();
+    WOWCAMERASTATE blocked, ten_hz, hundred_hz, hysteresis;
+    WOWCAMERAUPDATE input = {
+        .anchor = { 100.0f, 190.0f, 23.6f },
+        .viewangles = { 0.0f, 180.0f, 0.0f },
+        .desired_distance = 20.0f,
+        .seconds = 0.1f,
+    };
+    FLOAT blocked_distance, first_return;
+
+    test_wmo_fixture_enabled = true;
+    test_wmo_bsp_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    Wow_CameraReset(&blocked, input.desired_distance);
+    blocked_distance = Wow_CameraUpdate(&blocked, &input);
+    ASSERT(blocked.blocked);
+
+    hysteresis = blocked;
+    input.anchor.x -= 0.05f;
+    (void)Wow_CameraUpdate(&hysteresis, &input);
+    ASSERT_EQ_FLOAT(hysteresis.allowed_distance, blocked.allowed_distance, 0.001f);
+
+    ten_hz = hundred_hz = blocked;
+    input.anchor = (VECTOR3){ 100.0f, 200.0f, 23.6f };
+    first_return = Wow_CameraUpdate(&ten_hz, &input);
+    ASSERT(first_return > blocked_distance);
+    ASSERT(first_return <= blocked_distance + BZ_WOW_CAMERA_RETURN_SPEED * input.seconds + 0.001f);
+    ASSERT(first_return < input.desired_distance);
+    FOR_LOOP(i, 9) (void)Wow_CameraUpdate(&ten_hz, &input);
+    input.seconds = 0.01f;
+    FOR_LOOP(i, 100) (void)Wow_CameraUpdate(&hundred_hz, &input);
+    ASSERT(fabsf(ten_hz.visual_distance - hundred_hz.visual_distance) < 0.15f);
+    input.seconds = 0.1f;
+    FOR_LOOP(i, 100) (void)Wow_CameraUpdate(&ten_hz, &input);
+    ASSERT_EQ_FLOAT(ten_hz.visual_distance, input.desired_distance, 0.001f);
+    ASSERT_EQ_FLOAT(ten_hz.desired_distance, 20.0f, 0.001f);
+    ASSERT(!ten_hz.blocked);
+    if (game->Shutdown) game->Shutdown();
+}
+
 /* One static profiler observes the existing hot query path without allocation or result changes. */
 static void test_wow_world_profile_counts_resets_and_preserves_queries(void) {
     struct game_export *game = init_game();
@@ -1952,6 +2079,9 @@ static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
 int main(void) {
     RUN_TEST(test_wow_ground_query_reads_artificial_adt);
     RUN_TEST(test_wow_wmo_world_query_handles_floors_ramp_walls_and_door);
+    RUN_TEST(test_wow_camera_clamps_wall_and_preserves_door);
+    RUN_TEST(test_wow_camera_handles_ceiling_terrain_and_corner);
+    RUN_TEST(test_wow_camera_returns_smoothly_with_hysteresis);
     RUN_TEST(test_wow_world_profile_counts_resets_and_preserves_queries);
     RUN_TEST(test_wow_wmo_wall_blocks_aggro_melee_projectile_and_rewards);
     RUN_TEST(test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp);

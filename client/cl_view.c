@@ -2,6 +2,9 @@
 
 #include "client.h"
 #include "tr_public.h"
+#ifdef WOW
+#include "common/wow_camera_wow.h"
+#endif
 #ifdef SC2
 #include "games/starcraft-2/common/sc2_map.h"
 #endif
@@ -58,35 +61,6 @@ static FLOAT LerpDegrees(FLOAT a, FLOAT b, FLOAT t) {
     return a + delta * t;
 }
 
-static void Wow_AngleVectors(LPCVECTOR3 angles, LPVECTOR3 forward, LPVECTOR3 right, LPVECTOR3 up) {
-    FLOAT yaw = (FLOAT)DEG2RAD(angles->y);
-    FLOAT pitch = (FLOAT)DEG2RAD(angles->x);
-    FLOAT roll = (FLOAT)DEG2RAD(angles->z);
-    FLOAT sy = sinf(yaw);
-    FLOAT cy = cosf(yaw);
-    FLOAT sp = sinf(pitch);
-    FLOAT cp = cosf(pitch);
-    FLOAT sr = sinf(roll);
-    FLOAT cr = cosf(roll);
-
-    if (forward) {
-        *forward = (VECTOR3){ cp * cy, cp * sy, -sp };
-    }
-    if (right) {
-        *right = (VECTOR3){
-            -sr * sp * cy + cr * sy,
-            -sr * sp * sy - cr * cy,
-            -sr * cp,
-        };
-    }
-    if (up) {
-        *up = (VECTOR3){
-            cr * sp * cy + sr * sy,
-            cr * sp * sy - sr * cy,
-            cr * cp,
-        };
-    }
-}
 #endif
 
 #ifdef SC2
@@ -185,8 +159,11 @@ void Matrix4_getCameraMatrix(LPMATRIX4 output) {
     VECTOR3 offset;
     VECTOR3 eye;
 
-    origin.z = CM_GetHeightAtPoint(origin.x, origin.y) + 1.6f;
-    Wow_AngleVectors(&angles, &forward, NULL, NULL);
+    /* The entity snapshot carries WMO-floor Z; terrain reconstruction previously dropped cameras below upper floors. */
+    origin.z = Wow_CameraAnchorZ(cl.ents[cl.playerstate.number].prev.origin.z,
+                                cl.ents[cl.playerstate.number].current.origin.z,
+                                cl.viewDef.lerpfrac);
+    forward = Wow_CameraForward(&angles);
     offset = Vector3_scale(&forward, -distance);
     eye = Vector3_add(&origin, &offset);
 

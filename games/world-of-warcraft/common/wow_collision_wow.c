@@ -10,10 +10,6 @@
 #define CM_WOW_COLLISION_EPSILON  0.0001f
 #define CM_WOW_WALKABLE_NORMAL_Z  0.642788f
 
-typedef struct { VECTOR3 a, b, c; } CMWOWTRIANGLE;
-typedef CMWOWTRIANGLE *LPCMWOWTRIANGLE;
-typedef CMWOWTRIANGLE const *LPCCMWOWTRIANGLE;
-
 typedef struct {
     VECTOR3 start, displacement;
     FLOAT radius;
@@ -243,6 +239,44 @@ static BOOL CM_WowSweepSphereTriangle(LPCCMWOWSPHERESWEEP sweep, LPCMWOWSPHERERE
     CM_WowSweepSphereVertex(sweep, &sweep->triangle.b, result);
     CM_WowSweepSphereVertex(sweep, &sweep->triangle.c, result);
     return result->fraction < 1.0f;
+}
+
+/* Terrain and WMO callers share the same analytic sphere/triangle narrowphase. */
+BOOL CM_WowCollisionSweepTriangle(LPCCMWOWTRIANGLESWEEP sweep, LPWOWSWEEPRESULT result) {
+    LPCWOWSWEEPQUERY query = sweep->query;
+    FLOAT low = MIN(query->radius, query->height * 0.5f);
+    FLOAT high = MAX(low, query->height - low);
+    DWORD sphere_count = MAX(1u, (DWORD)ceilf((high - low) / MAX(query->radius, 0.1f)) + 1u);
+    BOOL hit = false;
+
+    FOR_LOOP(sphere, sphere_count) {
+        FLOAT offset = sphere_count == 1 ? low :
+            low + (high - low) * (FLOAT)sphere / (FLOAT)(sphere_count - 1);
+        CMWOWSPHERESWEEP sphere_sweep = {
+            .start = { query->start.x, query->start.y, query->start.z + offset },
+            .displacement = query->displacement,
+            .radius = query->radius,
+            .triangle = sweep->triangle,
+        };
+        CMWOWSPHERERESULT sphere_result;
+
+        if (!CM_WowSweepSphereTriangle(&sphere_sweep, &sphere_result)) continue;
+        if (sphere_result.start_solid &&
+            (!result->start_solid || sphere_result.penetration > result->penetration)) {
+            result->start_solid = true;
+            result->fraction = 0.0f;
+            result->penetration = sphere_result.penetration;
+            result->normal = sphere_result.normal;
+            result->surface = sweep->surface;
+            hit = true;
+        } else if (!result->start_solid && sphere_result.fraction < result->fraction) {
+            result->fraction = sphere_result.fraction;
+            result->normal = sphere_result.normal;
+            result->surface = sweep->surface;
+            hit = true;
+        }
+    }
+    return hit;
 }
 
 static BOOL CM_WowGroupTriangle(LPCCMWOWGROUPFACE source, LPCMWOWTRIANGLE triangle) {
@@ -557,26 +591,10 @@ BOOL CM_WowCollisionGroundTile(LPCCMWOWCOLLISIONTILE tile,
     return found;
 }
 
-static WOWBOX CM_WowSweepBounds(LPCWOWSWEEPQUERY query) {
-    VECTOR3 end = Vector3_add(&query->start, &query->displacement);
-    return (WOWBOX){
-        .min = {
-            MIN(query->start.x, end.x) - query->radius,
-            MIN(query->start.y, end.y) - query->radius,
-            MIN(query->start.z, end.z),
-        },
-        .max = {
-            MAX(query->start.x, end.x) + query->radius,
-            MAX(query->start.y, end.y) + query->radius,
-            MAX(query->start.z, end.z) + query->height,
-        },
-    };
-}
-
 BOOL CM_WowCollisionSweepTile(LPCCMWOWCOLLISIONTILE tile,
                               LPCWOWSWEEPQUERY query,
                               LPWOWSWEEPRESULT result) {
-    WOWBOX sweep_bounds = CM_WowSweepBounds(query);
+    WOWBOX sweep_bounds = CM_WowCollisionSweepBounds(query);
     BOOL hit = false;
 
     if (!tile) return false;
@@ -594,43 +612,17 @@ BOOL CM_WowCollisionSweepTile(LPCCMWOWCOLLISIONTILE tile,
             FOR_LOOP(face, group->face_count) {
                 CMWOWTRIANGLE triangle;
                 VECTOR3 triangle_normal;
-                FLOAT low = MIN(query->radius, query->height * 0.5f);
-                FLOAT high = MAX(low, query->height - low);
-                DWORD sphere_count = MAX(1u, (DWORD)ceilf((high - low) / MAX(query->radius, 0.1f)) + 1u);
 
                 CMWOWGROUPFACE source = { group, face, &instance->matrix };
 
                 CM_WowWorldProfileAdd(WOW_WORLD_PROFILE_TRIANGLE_TESTS, 1);
                 if (!CM_WowGroupTriangle(&source, &triangle)) continue;
                 triangle_normal = CM_WowTriangleNormal(&triangle);
-                if (fabsf(triangle_normal.z) >= CM_WOW_WALKABLE_NORMAL_Z) continue;
-                FOR_LOOP(sphere, sphere_count) {
-                    FLOAT offset = sphere_count == 1 ? low :
-                        low + (high - low) * (FLOAT)sphere / (FLOAT)(sphere_count - 1);
-                    CMWOWSPHERESWEEP sphere_sweep = {
-                        .start = { query->start.x, query->start.y, query->start.z + offset },
-                        .displacement = query->displacement,
-                        .radius = query->radius,
-                        .triangle = triangle,
-                    };
-                    CMWOWSPHERERESULT sphere_result;
-
-                    if (!CM_WowSweepSphereTriangle(&sphere_sweep, &sphere_result)) continue;
-                    if (sphere_result.start_solid &&
-                        (!result->start_solid || sphere_result.penetration > result->penetration)) {
-                        result->start_solid = true;
-                        result->fraction = 0.0f;
-                        result->penetration = sphere_result.penetration;
-                        result->normal = sphere_result.normal;
-                        result->surface = WOW_SURFACE_WMO;
-                        hit = true;
-                    } else if (!result->start_solid && sphere_result.fraction < result->fraction) {
-                        result->fraction = sphere_result.fraction;
-                        result->normal = sphere_result.normal;
-                        result->surface = WOW_SURFACE_WMO;
-                        hit = true;
-                    }
-                }
+                if (query->mode == WOW_SWEEP_MOVEMENT &&
+                    fabsf(triangle_normal.z) >= CM_WOW_WALKABLE_NORMAL_Z) continue;
+                hit |= CM_WowCollisionSweepTriangle(&(CMWOWTRIANGLESWEEP){
+                    .query = query, .triangle = triangle, .surface = WOW_SURFACE_WMO,
+                }, result);
             }
         }
     }
