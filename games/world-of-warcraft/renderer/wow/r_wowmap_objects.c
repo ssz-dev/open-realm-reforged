@@ -1,61 +1,10 @@
 #include "r_wowmap.h"
 
 VECTOR3 Wow_ObjectPoint(wowVec3_t p) {
-    return Wow_WorldPoint(
-        32.0f * WOW_ADT_SIZE - p.z,
-        32.0f * WOW_ADT_SIZE - p.x,
-        p.y);
+    return WowWmo_ObjectPoint(&p);
 }
 
-void Wow_InstanceMatrix(wowMapObjDef_t const *def, LPMATRIX4 matrix) {
-    MATRIX4 basis;
-    MATRIX4 tmp;
-    VECTOR3 origin;
-
-    Matrix4_identity(matrix);
-    origin = Wow_ObjectPoint(def->position);
-    Matrix4_translate(matrix, &origin);
-
-    Matrix4_identity(&basis);
-    basis.v[0] = 0.0f;
-    basis.v[1] = 1.0f;
-    basis.v[2] = 0.0f;
-    basis.v[4] = 0.0f;
-    basis.v[5] = 0.0f;
-    basis.v[6] = 1.0f;
-    basis.v[8] = 1.0f;
-    basis.v[9] = 0.0f;
-    basis.v[10] = 0.0f;
-    Matrix4_multiply(matrix, &basis, &tmp);
-    *matrix = tmp;
-
-    Matrix4_rotate(matrix, &(VECTOR3){ 0.0f, def->rotation.y - 270.0f, 0.0f }, ROTATE_XYZ);
-    Matrix4_rotate(matrix, &(VECTOR3){ 0.0f, 0.0f, -def->rotation.x }, ROTATE_XYZ);
-    Matrix4_rotate(matrix, &(VECTOR3){ def->rotation.z - 90.0f, 0.0f, 0.0f }, ROTATE_XYZ);
-    if (def->unk) {
-        float scale = def->unk / 1024.0f;
-        Matrix4_scale(matrix, &(VECTOR3){ scale, scale, scale });
-    }
-}
-
-void Wow_GroupPath(LPCSTR root_path, DWORD group_index, LPSTR out, DWORD out_size) {
-    size_t len = strlen(root_path);
-    if (len > 4 && Wow_PathHasExtension(root_path, ".wmo")) {
-        snprintf(out, out_size, "%.*s_%03u.wmo", (int)(len - 4), root_path, (unsigned)group_index);
-    } else {
-        snprintf(out, out_size, "%s_%03u.wmo", root_path, (unsigned)group_index);
-    }
-}
-
-LPCSTR Wow_StringAt(LPCSTR blob, DWORD blob_size, DWORD offset) {
-    if (!blob || offset >= blob_size) {
-        return NULL;
-    }
-    if (!memchr(blob + offset, '\0', blob_size - offset)) {
-        return NULL;
-    }
-    return blob + offset;
-}
+void Wow_InstanceMatrix(wowMapObjDef_t const *def, LPMATRIX4 matrix) { WowWmo_InstanceMatrix(def, matrix); }
 
 BOOL Wow_LoadWmoGroup(wowWmoModel_t *model,
                              DWORD group_index,
@@ -64,81 +13,34 @@ BOOL Wow_LoadWmoGroup(wowWmoModel_t *model,
     PATHSTR group_path;
     LPBYTE data = NULL;
     int size;
-    DWORD offset = 0;
-    BYTE const *mopy = NULL;
-    DWORD mopy_count = 0;
-    WORD const *indices = NULL;
-    DWORD index_count = 0;
-    wowVec3_t const *vertices = NULL;
-    DWORD vertex_count = 0;
-    wowVec2_t const *uvs = NULL;
-    DWORD uv_count = 0;
-    wowWmoBatchDef_t const *batches = NULL;
-    DWORD batch_count = 0;
+    WOWWMOGROUPVIEW view;
     BOX3 group_bounds = Wow_EmptyBounds();
     BOOL group_has_bounds = false;
     COLOR32 color = Wow_Color(127, 127, 127, 255);
 
-    Wow_GroupPath(model->path, group_index, group_path, sizeof(group_path));
+    WowWmo_GroupPath(&(WOWWMOGROUPPATH){
+        .root = model->path, .group = group_index, .out = group_path, .out_size = sizeof(group_path),
+    });
     size = ri.FS_ReadFile(group_path, (void **)&data);
     if (size <= 0 || !data) {
         fprintf(stderr, "WoW WMO: missing group %s\n", group_path);
         return false;
     }
 
-    while (offset + 8 <= (DWORD)size) {
-        BYTE const *tag = data + offset;
-        DWORD chunk_size = Wow_Read32(data + offset + 4);
-        BYTE const *chunk = data + offset + 8;
-        offset += 8;
-        if (offset + chunk_size > (DWORD)size) {
-            break;
-        }
-
-        if (Wow_TagEquals(tag, "PGOM")) {
-            DWORD sub = 0x44;
-            if (chunk_size < sub) {
-                break;
-            }
-            while (sub + 8 <= chunk_size) {
-                BYTE const *subtag = chunk + sub;
-                DWORD sub_size = Wow_Read32(chunk + sub + 4);
-                BYTE const *subchunk = chunk + sub + 8;
-                sub += 8;
-                if (sub + sub_size > chunk_size) {
-                    break;
-                }
-                if (Wow_TagEquals(subtag, "YPOM")) {
-                    mopy = subchunk;
-                    mopy_count = sub_size / sizeof(wowWmoPoly_t);
-                } else if (Wow_TagEquals(subtag, "IVOM")) {
-                    indices = (WORD const *)subchunk;
-                    index_count = sub_size / sizeof(WORD);
-                } else if (Wow_TagEquals(subtag, "TVOM")) {
-                    vertices = (wowVec3_t const *)subchunk;
-                    vertex_count = sub_size / sizeof(wowVec3_t);
-                } else if (Wow_TagEquals(subtag, "VTOM")) {
-                    uvs = (wowVec2_t const *)subchunk;
-                    uv_count = sub_size / sizeof(wowVec2_t);
-                } else if (Wow_TagEquals(subtag, "ABOM")) {
-                    batches = (wowWmoBatchDef_t const *)subchunk;
-                    batch_count = sub_size / sizeof(wowWmoBatchDef_t);
-                }
-                sub += sub_size;
-            }
-        }
-        offset += chunk_size;
+    if (!WowWmo_ParseGroup(data, (DWORD)size, &view)) {
+        fprintf(stderr, "WoW WMO: malformed group %s\n", group_path);
+        ri.FS_FreeFile(data);
+        return false;
     }
-
-    if (!vertices || !indices || !vertex_count || !index_count) {
+    if (!view.vertices || !view.indices || !view.vertex_count || !view.index_count) {
         fprintf(stderr, "WoW WMO: group %s has no drawable geometry\n", group_path);
         ri.FS_FreeFile(data);
         return false;
     }
 
-    if (batch_count) {
-        FOR_LOOP(batch_index, batch_count) {
-            wowWmoBatchDef_t const *batch = batches + batch_index;
+    if (view.batch_count) {
+        FOR_LOOP(batch_index, view.batch_count) {
+            LPCWOWWMOBATCHDEF batch = view.batches + batch_index;
             DWORD first_index = batch->first_index;
             DWORD num_indices = batch->num_indices;
             DWORD material_id = batch->material_id;
@@ -146,20 +48,20 @@ BOOL Wow_LoadWmoGroup(wowWmoModel_t *model,
             DWORD out_count = 0;
             wowWmoBatch_t *out_batch;
 
-            if (first_index >= index_count || first_index + num_indices > index_count || !num_indices) {
+            if (first_index >= view.index_count || first_index + num_indices > view.index_count || !num_indices) {
                 continue;
             }
             out_vertices = ri.MemAlloc(sizeof(VERTEX) * num_indices);
             FOR_LOOP(i, num_indices) {
-                WORD vertex_index = indices[first_index + i];
+                WORD vertex_index = view.indices[first_index + i];
                 wowVec3_t p;
                 wowVec2_t uv = { 0.0f, 0.0f };
-                if (vertex_index >= vertex_count) {
+                if (vertex_index >= view.vertex_count) {
                     continue;
                 }
-                p = vertices[vertex_index];
-                if (uvs && vertex_index < uv_count) {
-                    uv = uvs[vertex_index];
+                p = view.vertices[vertex_index];
+                if (view.uvs && vertex_index < view.uv_count) {
+                    uv = view.uvs[vertex_index];
                 }
                 out_vertices[out_count] = Wow_Vertex(p.x, p.y, p.z, uv.u, uv.v, color);
                 Wow_AddBoundsPoint(&group_bounds, &out_vertices[out_count].position);
@@ -182,23 +84,23 @@ BOOL Wow_LoadWmoGroup(wowWmoModel_t *model,
             ri.MemFree(out_vertices);
         }
     } else {
-        VERTEX *out_vertices = ri.MemAlloc(sizeof(VERTEX) * index_count);
+        VERTEX *out_vertices = ri.MemAlloc(sizeof(VERTEX) * view.index_count);
         DWORD out_count = 0;
-        FOR_LOOP(i, index_count) {
-            WORD vertex_index = indices[i];
+        FOR_LOOP(i, view.index_count) {
+            WORD vertex_index = view.indices[i];
             DWORD poly_index = i / 3;
             DWORD material_id = 0;
             wowVec3_t p;
             wowVec2_t uv = { 0.0f, 0.0f };
-            if (vertex_index >= vertex_count) {
+            if (vertex_index >= view.vertex_count) {
                 continue;
             }
-            if (mopy && poly_index < mopy_count) {
-                material_id = ((wowWmoPoly_t const *)mopy)[poly_index].material_id;
+            if (view.polygons && poly_index < view.polygon_count) {
+                material_id = view.polygons[poly_index].material_id;
             }
-            p = vertices[vertex_index];
-            if (uvs && vertex_index < uv_count) {
-                uv = uvs[vertex_index];
+            p = view.vertices[vertex_index];
+            if (view.uvs && vertex_index < view.uv_count) {
+                uv = view.uvs[vertex_index];
             }
             out_vertices[out_count] = Wow_Vertex(p.x, p.y, p.z, uv.u, uv.v, color);
             Wow_AddBoundsPoint(&group_bounds, &out_vertices[out_count].position);
@@ -227,12 +129,7 @@ BOOL Wow_LoadWmoGroup(wowWmoModel_t *model,
 BOOL Wow_LoadWmoModel(wowWmoModel_t *model) {
     LPBYTE data = NULL;
     int size;
-    DWORD offset = 0;
-    DWORD group_count = 0;
-    LPCSTR texture_blob = NULL;
-    DWORD texture_blob_size = 0;
-    BYTE const *materials_blob = NULL;
-    DWORD material_count = 0;
+    WOWWMOROOTVIEW view;
     LPTEXTURE *materials = NULL;
 
     size = ri.FS_ReadFile(model->path, (void **)&data);
@@ -241,47 +138,27 @@ BOOL Wow_LoadWmoModel(wowWmoModel_t *model) {
         return false;
     }
 
-    while (offset + 8 <= (DWORD)size) {
-        BYTE const *tag = data + offset;
-        DWORD chunk_size = Wow_Read32(data + offset + 4);
-        BYTE const *chunk = data + offset + 8;
-        offset += 8;
-        if (offset + chunk_size > (DWORD)size) {
-            break;
-        }
-        if (Wow_TagEquals(tag, "DHOM") && chunk_size >= 8) {
-            group_count = Wow_Read32(chunk + 4);
-        } else if (Wow_TagEquals(tag, "XTOM")) {
-            texture_blob = (LPCSTR)chunk;
-            texture_blob_size = chunk_size;
-        } else if (Wow_TagEquals(tag, "TMOM")) {
-            materials_blob = chunk;
-            material_count = chunk_size / 64;
-        }
-        offset += chunk_size;
-    }
-
-    if (!group_count) {
-        fprintf(stderr, "WoW WMO: %s has no groups\n", model->path);
+    if (!WowWmo_ParseRoot(data, (DWORD)size, &view)) {
+        fprintf(stderr, "WoW WMO: malformed root %s\n", model->path);
         ri.FS_FreeFile(data);
         return false;
     }
 
-    if (material_count) {
-        materials = ri.MemAlloc(sizeof(*materials) * material_count);
-        memset(materials, 0, sizeof(*materials) * material_count);
-        FOR_LOOP(i, material_count) {
-            DWORD texture_offset = Wow_Read32(materials_blob + i * 64 + 0x0c);
-            LPCSTR texture_path = Wow_StringAt(texture_blob, texture_blob_size, texture_offset);
+    if (view.material_count) {
+        materials = ri.MemAlloc(sizeof(*materials) * view.material_count);
+        memset(materials, 0, sizeof(*materials) * view.material_count);
+        FOR_LOOP(i, view.material_count) {
+            DWORD texture_offset = WowWmo_Read32(view.materials + i * 64 + 0x0c);
+            LPCSTR texture_path = WowWmo_StringAt(view.textures, view.texture_size, texture_offset);
             materials[i] = texture_path ? Wow_LoadTexture(texture_path) : tr.texture[TEX_WHITE];
         }
     }
 
-    model->groups = ri.MemAlloc(sizeof(*model->groups) * group_count);
-    memset(model->groups, 0, sizeof(*model->groups) * group_count);
-    model->num_groups = group_count;
-    FOR_LOOP(i, group_count) {
-        Wow_LoadWmoGroup(model, i, materials, material_count);
+    model->groups = ri.MemAlloc(sizeof(*model->groups) * view.group_count);
+    memset(model->groups, 0, sizeof(*model->groups) * view.group_count);
+    model->num_groups = view.group_count;
+    FOR_LOOP(i, view.group_count) {
+        Wow_LoadWmoGroup(model, i, materials, view.material_count);
     }
 
     if (materials) {

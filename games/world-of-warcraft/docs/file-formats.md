@@ -47,7 +47,13 @@ Implementation notes:
 | WMO root | Large buildings, caves, cities, dungeons, and other static world structures. | Root header, materials, texture names, group names/info, doodad sets, doodad names/definitions, lights, fog, portals. | [wowdev WMO](https://wowdev.wiki/WMO), [getMaNGOS WMO File](https://www.getmangos.eu/wiki/referenceinfo/clientfiles/wmo-file-r20030/), [wow-wmo docs.rs](https://docs.rs/wow-wmo). |
 | WMO group | Per-group geometry for one part of a WMO. | `MOGP`, `MOPY`, `MOVI`, `MOVT`, `MONR`, `MOTV`, `MOBA`, optional `MOCV`, `MOBN`/`MOBR`, `MLIQ`, `MODR`. | [getMaNGOS WMO group chunk notes](https://www.getmangos.eu/wiki/referenceinfo/clientfiles/wmo-file-r20030/), [pywowlib WMO reader](https://github.com/wowdev/pywowlib/blob/master/wmo_file.py). |
 
-Current renderer code loads enough WMO root/group data to create visible batches and counts missing groups. Collision, portals, fog, indoor lighting, liquids, doodad-set filtering, and exact material behavior are not complete.
+`games/world-of-warcraft/common/wow_wmo_format.h` is the authoritative parser
+used by both renderer and gameplay collision. It exposes root materials and
+group `MOPY`, `MOVI`, `MOVT`, `MOTV`, `MOBA`, `MOBN`, and `MOBR` views with
+strict chunk bounds checks. The gameplay cache selects collision faces from
+`MOBN` leaf ranges into `MOBR`; render faces are not automatically substituted
+when those dedicated chunks exist. Portals, fog, indoor lighting, liquids,
+doodad-set filtering, and exact material behavior remain incomplete.
 
 ## Models, Skins, And Animation
 

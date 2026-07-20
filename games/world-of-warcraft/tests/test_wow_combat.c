@@ -55,6 +55,15 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     return true;
 }
 
+BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
+    if (!query || !result) return false;
+    *result = (WOWSWEEPRESULT){
+        .end = Vector3_add(&query->start, &query->displacement),
+        .fraction = 1.0f,
+    };
+    return false;
+}
+
 DWORD Wow_EntityIndex(LPCEDICT ent) {
     if (!ent || ent < wow_edicts || ent >= wow_edicts + WOW_MAX_EDICTS) {
         return WOW_MAX_EDICTS;

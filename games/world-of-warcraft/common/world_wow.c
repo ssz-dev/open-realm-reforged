@@ -1,4 +1,5 @@
 #include "common/common.h"
+#include "common/wow_collision_local.h"
 #include "common/wow_world_query.h"
 #include <limits.h>
 #include <math.h>
@@ -22,6 +23,7 @@ typedef struct {
     int               tile_x;
     int               tile_y;
     DWORD             stamp;
+    CMWOWCOLLISIONTILE collision;
     cmWowChunkHeight_t chunks[16][16];
 } cmWowAdtHeightCache_t;
 
@@ -99,6 +101,8 @@ static void CM_WowSetMapPath(LPCSTR mapFilename) {
     LPCSTR base;
     size_t dir_len, name_len;
 
+    FOR_LOOP(i, CM_WOW_ADT_CACHE_SIZE) CM_WowCollisionTileFree(&cm_wow_height_cache[i].collision);
+    CM_WowCollisionReset();
     memset(cm_wow_height_cache, 0, sizeof(cm_wow_height_cache));
     cm_wow_height_cache_stamp = 0;
     cm_wow_map_dir[0]  = '\0';
@@ -202,6 +206,11 @@ static void CM_WowLoadAdtHeights(cmWowAdtHeightCache_t *cache, int tile_x, int t
         }
         offset += chunk_size;
     }
+    if (!CM_WowCollisionTileLoad(&cache->collision, data, size))
+        fprintf(stderr, "OpenWoW collision: failed to load ADT tile %d,%d objects\n", tile_x, tile_y);
+    else if (cache->collision.instance_count)
+        fprintf(stderr, "OpenWoW collision: ADT tile %d,%d loaded %u WMO instances\n",
+                tile_x, tile_y, (unsigned)cache->collision.instance_count);
     FS_FreeFile(data);
 }
 
@@ -508,16 +517,12 @@ bool CM_LoadMapFormat(LPCSTR mapFilename) {
     return true;
 }
 
-/* This is the single gameplay floor contract; later surfaces compete here without changing callers. */
-BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
+/* Terrain remains one candidate in the central floor contract, including non-walkable step detection. */
+static BOOL CM_WowQueryTerrainGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     FLOAT center, left, right, down, up;
     BOOL has_left, has_right, has_down, has_up;
 
-    if (result) *result = (WOWGROUNDRESULT){ .normal = { 0.0f, 0.0f, 1.0f } };
-    if (!query || !result || !isfinite(query->origin.x) || !isfinite(query->origin.y) ||
-        !isfinite(query->origin.z) || !isfinite(query->max_down) || !isfinite(query->max_up) ||
-        query->max_down < 0.0f || query->max_up < 0.0f ||
-        !CM_WowTerrainHeightAtPoint(query->origin.x, query->origin.y, &center) ||
+    if (!CM_WowTerrainHeightAtPoint(query->origin.x, query->origin.y, &center) ||
         center < query->origin.z - query->max_down ||
         center > query->origin.z + query->max_up)
         return false;
@@ -541,6 +546,62 @@ BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
     result->height = center;
     result->surface = WOW_SURFACE_TERRAIN;
     return true;
+}
+
+/* Terrain and WMO floors compete here, so callers never know which archive supplied contact. */
+BOOL CM_WowQueryGround(LPCWOWGROUNDQUERY query, LPWOWGROUNDRESULT result) {
+    int tile_x, tile_y;
+    cmWowAdtHeightCache_t *cache;
+    WOWGROUNDRESULT terrain = { .normal = { 0.0f, 0.0f, 1.0f } };
+    WOWGROUNDRESULT wmo = { .normal = { 0.0f, 0.0f, 1.0f } };
+    BOOL has_terrain, has_wmo;
+
+    if (result) *result = (WOWGROUNDRESULT){ .normal = { 0.0f, 0.0f, 1.0f } };
+    if (!query || !result || !isfinite(query->origin.x) || !isfinite(query->origin.y) ||
+        !isfinite(query->origin.z) || !isfinite(query->max_down) || !isfinite(query->max_up) ||
+        !isfinite(query->max_walkable_up) || query->max_down < 0.0f || query->max_up < 0.0f ||
+        query->max_walkable_up < 0.0f)
+        return false;
+    tile_x = CM_WowAdtIndexForWorldCoord(query->origin.y);
+    tile_y = CM_WowAdtIndexForWorldCoord(query->origin.x);
+    if (tile_x < 0 || tile_x >= 64 || tile_y < 0 || tile_y >= 64) return false;
+    cache = CM_WowHeightCache(tile_x, tile_y);
+    has_terrain = CM_WowQueryTerrainGround(query, &terrain);
+    has_wmo = CM_WowCollisionGroundTile(&cache->collision, query, &wmo);
+    if (!has_terrain && !has_wmo) return false;
+    *result = has_wmo && (!has_terrain || wmo.height > terrain.height) ? wmo : terrain;
+    return true;
+}
+
+/* Sweeps visit only overlapped ADT cache entries and keep earliest WMO contact across tile edges. */
+BOOL CM_WowSweepWorld(LPCWOWSWEEPQUERY query, LPWOWSWEEPRESULT result) {
+    VECTOR3 end;
+    int min_tile_x, max_tile_x, min_tile_y, max_tile_y;
+    BOOL hit = false;
+
+    if (result) *result = (WOWSWEEPRESULT){ .fraction = 1.0f };
+    if (!query || !result || !isfinite(query->start.x) || !isfinite(query->start.y) ||
+        !isfinite(query->start.z) || !isfinite(query->displacement.x) ||
+        !isfinite(query->displacement.y) || !isfinite(query->displacement.z) ||
+        !isfinite(query->radius) || !isfinite(query->height) || query->radius <= 0.0f ||
+        query->height < query->radius * 2.0f)
+        return false;
+    end = Vector3_add(&query->start, &query->displacement);
+    min_tile_x = MIN(CM_WowAdtIndexForWorldCoord(MIN(query->start.y, end.y) - query->radius),
+                     CM_WowAdtIndexForWorldCoord(MAX(query->start.y, end.y) + query->radius));
+    max_tile_x = MAX(CM_WowAdtIndexForWorldCoord(MIN(query->start.y, end.y) - query->radius),
+                     CM_WowAdtIndexForWorldCoord(MAX(query->start.y, end.y) + query->radius));
+    min_tile_y = MIN(CM_WowAdtIndexForWorldCoord(MIN(query->start.x, end.x) - query->radius),
+                     CM_WowAdtIndexForWorldCoord(MAX(query->start.x, end.x) + query->radius));
+    max_tile_y = MAX(CM_WowAdtIndexForWorldCoord(MIN(query->start.x, end.x) - query->radius),
+                     CM_WowAdtIndexForWorldCoord(MAX(query->start.x, end.x) + query->radius));
+    min_tile_x = MAX(0, min_tile_x); max_tile_x = MIN(63, max_tile_x);
+    min_tile_y = MAX(0, min_tile_y); max_tile_y = MIN(63, max_tile_y);
+    for (int tile_y = min_tile_y; tile_y <= max_tile_y; tile_y++)
+        for (int tile_x = min_tile_x; tile_x <= max_tile_x; tile_x++)
+            hit |= CM_WowCollisionSweepTile(&CM_WowHeightCache(tile_x, tile_y)->collision, query, result);
+    result->end = Vector3_mad(&query->start, result->fraction, &query->displacement);
+    return hit;
 }
 
 FLOAT CM_GetHeightAtPoint(FLOAT sx, FLOAT sy) {

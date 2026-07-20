@@ -72,26 +72,38 @@ Each generated clump is two crossed, tapered blade triangles in a chunk-local VA
 
 This is intentionally a first-pass ground-effect renderer. Exact client-style `GroundEffectTexture.dbc` and `GroundEffectDoodad.dbc` model selection can replace the placeholder blade geometry without changing the ADT placement path.
 
-## Height Queries
+## Gameplay World Queries
 
-`games/world-of-warcraft/common/world_wow.c` keeps a one-ADT height cache for collision/spawn queries. It loads `MCVT` height samples from `MCNK` chunks and resolves point height by splitting a local cell around the center sample into triangles, then using barycentric interpolation.
+`games/world-of-warcraft/common/world_wow.c` keeps a fixed nine-ADT LRU for
+gameplay queries. It loads `MCVT` height samples from `MCNK` chunks and resolves
+point height by splitting a local cell around the center sample into triangles,
+then using barycentric interpolation.
 
-This is intentionally narrow: it is enough to ground actors on loaded terrain while the renderer and game scaffolding evolve.
+The same ADT read feeds `MWMO`/`MWID`/`MODF` into the gameplay WMO cache.
+`CM_WowQueryGround` resolves terrain, indoor floors, stacked floors, ramps, and
+roofs as competing candidates. `CM_WowSweepWorld` performs swept
+capsule-shaped obstacle queries with instance/group bounds as broadphase and
+`MOBN`/`MOBR` triangle geometry as narrowphase.
 
 ## Doodads And WMOs
 
-ADT object references are renderer-owned today:
+ADT object rendering remains renderer-owned:
 
 - `MDDF` entries produce doodad instances backed by M2 models.
 - `MODF` entries produce WMO instances.
 - Doodads are bucketed for draw-distance culling.
 - Missing doodad/WMO models are counted and can be represented by debug marker geometry when debug flags are enabled.
 
-Game entities are not spawned for every ADT doodad. `games/world-of-warcraft/game/g_wow.c` logs that static ADT doodads are renderer-owned and not synchronized as entities.
+The renderer and gameplay collision share WMO chunk interpretation through
+`games/world-of-warcraft/common/wow_wmo_format.h`; gameplay does not depend on
+renderer runtime objects. Game entities are not spawned for every ADT doodad.
+Small and decorative M2 doodads remain non-solid until verified collision
+geometry or collidable flags can select only relevant static obstacles.
 
 ## Current Limits
 
 - Terrain rendering is the core focus.
-- WMO, doodad, lighting, grass, particles, water, and animation fidelity are incomplete.
+- WMO rendering/collision is present; portals, doodad collision, lighting,
+  particles, water, and animation fidelity are incomplete.
 - The draw window and asset compatibility are tuned around local classic-era data.
 - Production support for arbitrary WoW client versions is not present.

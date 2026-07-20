@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "game/g_wow_local.h"
+#include "common/wow_wmo_format.h"
 
 int _tests_run = 0;
 int _tests_failed = 0;
@@ -35,10 +36,16 @@ static DWORD test_hud_write_calls;
 static DWORD test_quest_show_calls;
 static DWORD test_quest_hide_calls;
 static DWORD test_adt_reads;
+static DWORD test_wmo_root_reads;
+static DWORD test_wmo_group_reads;
+static BOOL test_wmo_fixture_enabled;
+static BOOL test_wmo_bsp_enabled;
 static char test_last_error[512];
 static char test_save_path[MAX_PATHLEN];
 
 #define TEST_PROGRESS_PATH "build/tests/openwow-progress-test.sav"
+#define TEST_WMO_ROOT "World\\Test\\Physics.wmo"
+#define TEST_WMO_GROUP "World\\Test\\Physics_000.wmo"
 
 /* ---- configstring stubs (game_import.configstring / GetConfigstring) ---- */
 #define TEST_CONFIGSTRINGS 128
@@ -235,6 +242,105 @@ static HANDLE make_area_table_dbc(LPDWORD size_out) {
     return data;
 }
 
+typedef struct {
+    LPBYTE data;
+    LPDWORD size;
+    LPCSTR tag;
+    LPCVOID payload;
+    DWORD payload_size;
+} TESTCHUNK;
+
+typedef struct {
+    LPWOWVEC3 vertices;
+    WORD *indices;
+    LPDWORD count;
+    VECTOR3 points[4];
+} TESTWMOQUAD;
+
+static LPBYTE append_chunk(TESTCHUNK const *chunk) {
+    LPBYTE next = realloc(chunk->data, *chunk->size + 8 + chunk->payload_size);
+
+    ASSERT_NOT_NULL(next);
+    if (!next) return chunk->data;
+    memcpy(next + *chunk->size, chunk->tag, 4);
+    put32(next + *chunk->size + 4, chunk->payload_size);
+    if (chunk->payload_size)
+        memcpy(next + *chunk->size + 8, chunk->payload, chunk->payload_size);
+    *chunk->size += 8 + chunk->payload_size;
+    return next;
+}
+
+static WOWVEC3 test_wmo_local(FLOAT world_x, FLOAT world_y, FLOAT world_z) {
+    return (WOWVEC3){ world_y - 200.0f, world_z - 20.0f, world_x - 100.0f };
+}
+
+static void test_wmo_quad(TESTWMOQUAD const *quad) {
+    DWORD first = *quad->count;
+
+    quad->vertices[first] = test_wmo_local(quad->points[0].x, quad->points[0].y, quad->points[0].z);
+    quad->vertices[first + 1] = test_wmo_local(quad->points[1].x, quad->points[1].y, quad->points[1].z);
+    quad->vertices[first + 2] = test_wmo_local(quad->points[2].x, quad->points[2].y, quad->points[2].z);
+    quad->vertices[first + 3] = test_wmo_local(quad->points[0].x, quad->points[0].y, quad->points[0].z);
+    quad->vertices[first + 4] = test_wmo_local(quad->points[2].x, quad->points[2].y, quad->points[2].z);
+    quad->vertices[first + 5] = test_wmo_local(quad->points[3].x, quad->points[3].y, quad->points[3].z);
+    FOR_LOOP(i, 6) quad->indices[first + i] = (WORD)(first + i);
+    *quad->count += 6;
+}
+
+static HANDLE make_test_wmo_root(LPDWORD size_out) {
+    BYTE mohd[64] = { 0 };
+    LPBYTE data = NULL;
+    DWORD size = 0;
+
+    put32(mohd + 4, 1);
+    data = append_chunk(&(TESTCHUNK){ data, &size, "DHOM", mohd, sizeof(mohd) });
+    *size_out = size;
+    return data;
+}
+
+static HANDLE make_test_wmo_group(LPDWORD size_out) {
+    enum { FACE_COUNT = 12, VERTEX_COUNT = FACE_COUNT * 3 };
+    WOWVEC3 vertices[VERTEX_COUNT];
+    WORD indices[VERTEX_COUNT], refs[FACE_COUNT];
+    WOWWMOPOLY polygons[FACE_COUNT];
+    WOWWMOBSPNODE node = { .plane_type = 4, .num_faces = FACE_COUNT };
+    BYTE group_header[WOW_WMO_GROUP_HEADER_SIZE] = { 0 };
+    LPBYTE group = NULL, data = NULL;
+    DWORD group_size = 0, size = 0, count = 0;
+
+    test_wmo_quad(&(TESTWMOQUAD){ vertices, indices, &count,
+        {{ 90, 180, 22 }, { 130, 180, 22 }, { 130, 220, 22 }, { 90, 220, 22 }} });
+    test_wmo_quad(&(TESTWMOQUAD){ vertices, indices, &count,
+        {{ 90, 190, 25 }, { 130, 190, 25 }, { 130, 210, 25 }, { 90, 210, 25 }} });
+    test_wmo_quad(&(TESTWMOQUAD){ vertices, indices, &count,
+        {{ 90, 190, 30 }, { 130, 190, 30 }, { 130, 210, 30 }, { 90, 210, 30 }} });
+    test_wmo_quad(&(TESTWMOQUAD){ vertices, indices, &count,
+        {{ 110, 180, 20 }, { 110, 195, 20 }, { 110, 195, 30 }, { 110, 180, 30 }} });
+    test_wmo_quad(&(TESTWMOQUAD){ vertices, indices, &count,
+        {{ 110, 205, 20 }, { 110, 220, 20 }, { 110, 220, 30 }, { 110, 205, 30 }} });
+    test_wmo_quad(&(TESTWMOQUAD){ vertices, indices, &count,
+        {{ 120, 212, 22 }, { 130, 212, 26 }, { 130, 218, 26 }, { 120, 218, 22 }} });
+    FOR_LOOP(i, FACE_COUNT) polygons[i] = (WOWWMOPOLY){ .flags = 0x20 }, refs[i] = (WORD)i;
+    put32(group_header + 8, 1);
+    memcpy(group_header + 12, &(WOWVEC3){ -20, 0, -10 }, sizeof(WOWVEC3));
+    memcpy(group_header + 24, &(WOWVEC3){ 20, 10, 30 }, sizeof(WOWVEC3));
+    group = calloc(1, sizeof(group_header));
+    ASSERT_NOT_NULL(group);
+    memcpy(group, group_header, sizeof(group_header));
+    group_size = sizeof(group_header);
+    group = append_chunk(&(TESTCHUNK){ group, &group_size, "YPOM", polygons, sizeof(polygons) });
+    group = append_chunk(&(TESTCHUNK){ group, &group_size, "IVOM", indices, sizeof(indices) });
+    group = append_chunk(&(TESTCHUNK){ group, &group_size, "TVOM", vertices, sizeof(vertices) });
+    if (test_wmo_bsp_enabled) {
+        group = append_chunk(&(TESTCHUNK){ group, &group_size, "NBOM", &node, sizeof(node) });
+        group = append_chunk(&(TESTCHUNK){ group, &group_size, "RBOM", refs, sizeof(refs) });
+    }
+    data = append_chunk(&(TESTCHUNK){ data, &size, "PGOM", group, group_size });
+    free(group);
+    *size_out = size;
+    return data;
+}
+
 /* A complete artificial flat ADT makes every game-path query deterministic without real WoW data. */
 static HANDLE make_area_adt(int tile_x, int tile_y, LPDWORD size_out) {
     enum { MCVT_SIZE = 145 * sizeof(FLOAT), MCNK_SIZE = 0x80 + 8 + MCVT_SIZE };
@@ -261,6 +367,23 @@ static HANDLE make_area_adt(int tile_x, int tile_y, LPDWORD size_out) {
             put32(mcvt + 4, MCVT_SIZE);
             offset += 8 + MCNK_SIZE;
         }
+    }
+    if (test_wmo_fixture_enabled && tile_x == 31 && tile_y == 31) {
+        LPCSTR name = TEST_WMO_ROOT;
+        DWORD name_offset = 0;
+        WOWMAPOBJDEF definition = {
+            .position = {
+                WOW_WMO_WORLD_OFFSET - 200.0f,
+                20.0f,
+                WOW_WMO_WORLD_OFFSET - 100.0f,
+            },
+            .rotation = { 0.0f, 270.0f, 90.0f },
+            .scale = 1024,
+        };
+
+        data = append_chunk(&(TESTCHUNK){ data, &size, "OMWM", name, (DWORD)strlen(name) + 1 });
+        data = append_chunk(&(TESTCHUNK){ data, &size, "DIWM", &name_offset, sizeof(name_offset) });
+        data = append_chunk(&(TESTCHUNK){ data, &size, "FDOM", &definition, sizeof(definition) });
     }
     *size_out = size;
     return data;
@@ -309,6 +432,14 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
     }
     if (path_eq(filename, "DBFilesClient\\AreaTable.dbc")) {
         return make_area_table_dbc(size);
+    }
+    if (test_wmo_fixture_enabled && path_eq(filename, TEST_WMO_ROOT)) {
+        test_wmo_root_reads++;
+        return make_test_wmo_root(size);
+    }
+    if (test_wmo_fixture_enabled && path_eq(filename, TEST_WMO_GROUP)) {
+        test_wmo_group_reads++;
+        return make_test_wmo_group(size);
     }
     if (parse_area_adt_path(filename, &tile_x, &tile_y)) {
         test_adt_reads++;
@@ -563,6 +694,10 @@ static void reset_test_state(void) {
     test_quest_show_calls = 0;
     test_quest_hide_calls = 0;
     test_adt_reads = 0;
+    test_wmo_root_reads = 0;
+    test_wmo_group_reads = 0;
+    test_wmo_fixture_enabled = false;
+    test_wmo_bsp_enabled = false;
     memset(test_last_error, 0, sizeof(test_last_error));
     memset(test_configstrings, 0, sizeof(test_configstrings));
     test_save_path[0] = '\0';
@@ -681,6 +816,119 @@ static void test_wow_ground_query_reads_artificial_adt(void) {
     query.origin = (VECTOR3){ 40000.0f, 40000.0f, 0.0f };
     query.max_down = query.max_up = 100.0f;
     ASSERT(!CM_WowQueryGround(&query, &ground));
+    if (game->Shutdown) game->Shutdown();
+}
+
+static void test_wow_wmo_world_query_handles_floors_ramp_walls_and_door(void) {
+    struct game_export *game = init_game();
+    WOWGROUNDQUERY ground_query = {
+        .origin = { 100.0f, 200.0f, 26.0f },
+        .max_down = 10.0f,
+        .max_up = 4.0f,
+        .max_walkable_up = 0.75f,
+    };
+    WOWGROUNDRESULT ground;
+    WOWSWEEPQUERY sweep = {
+        .start = { 100.0f, 190.0f, 22.0f },
+        .displacement = { 20.0f, 0.0f, 0.0f },
+        .radius = 0.6f,
+        .height = 2.0f,
+    };
+    WOWSWEEPRESULT trace;
+
+    test_wmo_fixture_enabled = true;
+    test_wmo_bsp_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    ASSERT(CM_WowQueryGround(&ground_query, &ground));
+    ASSERT_EQ_FLOAT(ground.height, 25.0f, 0.001f);
+    ASSERT_EQ_INT((int)ground.surface, WOW_SURFACE_WMO);
+    ASSERT_EQ_INT((int)test_adt_reads, 1);
+    ASSERT_EQ_INT((int)test_wmo_root_reads, 1);
+    ASSERT_EQ_INT((int)test_wmo_group_reads, 1);
+    ASSERT(CM_WowQueryGround(&ground_query, &ground));
+    ASSERT_EQ_INT((int)test_adt_reads, 1);
+    ASSERT_EQ_INT((int)test_wmo_root_reads, 1);
+
+    ground_query.origin = (VECTOR3){ 125.0f, 215.0f, 25.0f };
+    ASSERT(CM_WowQueryGround(&ground_query, &ground));
+    ASSERT_EQ_FLOAT(ground.height, 24.0f, 0.001f);
+    ASSERT(ground.normal.z > 0.9f);
+    ASSERT(CM_WowSweepWorld(&sweep, &trace));
+    ASSERT(!trace.start_solid);
+    ASSERT(trace.fraction > 0.4f && trace.fraction < 0.5f);
+    ASSERT_EQ_INT((int)trace.surface, WOW_SURFACE_WMO);
+
+    sweep.start.y = 200.0f;
+    ASSERT(!CM_WowSweepWorld(&sweep, &trace));
+    ASSERT_EQ_FLOAT(trace.fraction, 1.0f, 0.001f);
+    sweep.start = (VECTOR3){ 110.0f, 190.0f, 22.0f };
+    sweep.displacement = (VECTOR3){ 0.0f, 0.0f, 0.0f };
+    ASSERT(CM_WowSweepWorld(&sweep, &trace));
+    ASSERT(trace.start_solid);
+    ASSERT(trace.penetration > 0.5f);
+    {
+        LPEDICT player = &wow_edicts[0];
+        LPEDICT creature = &wow_edicts[1];
+        wowEntityLocal_t *player_local = Wow_EntityLocal(player);
+        wowEntityLocal_t *creature_local = Wow_EntityLocal(creature);
+        VECTOR3 player_start = { 100.0f, 190.0f, 22.0f };
+        VECTOR3 creature_start = { 105.0f, 190.0f, 22.0f };
+        VECTOR3 blocked_respawn = { 110.0f, 190.0f, 22.0f };
+
+        memset(player, 0, sizeof(*player)); memset(player_local, 0, sizeof(*player_local));
+        player->inuse = true; player->s.number = 0; player->s.model = 1; player->s.radius = 1.0f;
+        player_local->kind = WOW_ENTITY_PLAYER; player_local->health = player_local->max_health = 100;
+        ASSERT(Wow_PlaceEntityOnGround(player, &player_start));
+        (void)Wow_MoveEntity(player, &(VECTOR2){ 20.0f, 0.0f }, 0.5f);
+        ASSERT(player->s.origin.x > 109.0f && player->s.origin.x < 109.5f);
+
+        memset(player, 0, sizeof(*player)); memset(player_local, 0, sizeof(*player_local));
+        player->inuse = true; player->s.number = 0; player->s.model = 1;
+        player->s.origin = (VECTOR3){ 120.0f, 190.0f, 22.0f };
+        player->s.origin2 = (VECTOR2){ 120.0f, 190.0f };
+        player_local->kind = WOW_ENTITY_PLAYER; player_local->health = player_local->max_health = 100;
+        memset(creature, 0, sizeof(*creature)); memset(creature_local, 0, sizeof(*creature_local));
+        creature->inuse = true; creature->s.number = 1; creature->s.model = 1; creature->s.radius = 0.5f;
+        creature_local->kind = WOW_ENTITY_CREATURE; creature_local->hostile = true;
+        creature_local->health = creature_local->max_health = 10;
+        creature_local->home = (VECTOR2){ creature_start.x, creature_start.y };
+        creature_local->enemy = player; creature_local->ai_state = WOW_AI_CHASE;
+        ASSERT(Wow_PlaceEntityOnGround(creature, &creature_start));
+        FOR_LOOP(i, 30) Wow_AIRunFrame(creature);
+        ASSERT(creature->s.origin.x > 109.0f && creature->s.origin.x < 109.6f);
+        ASSERT_EQ_FLOAT(creature->s.origin.y, 190.0f, 0.01f);
+        ASSERT(creature_local->grounded);
+        ASSERT(!Wow_PlaceEntityOnGround(creature, &blocked_respawn));
+        ASSERT(creature->s.origin.x < 109.6f);
+    }
+    if (game->Shutdown) game->Shutdown();
+}
+
+static void test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp(void) {
+    struct game_export *game = init_game();
+    WOWGROUNDQUERY ground_query = {
+        .origin = { 100.0f, 200.0f, 26.0f },
+        .max_down = 10.0f,
+        .max_up = 4.0f,
+        .max_walkable_up = 0.75f,
+    };
+    WOWSWEEPQUERY sweep = {
+        .start = { 100.0f, 190.0f, 22.0f },
+        .displacement = { 20.0f, 0.0f, 0.0f },
+        .radius = 0.6f,
+        .height = 2.0f,
+    };
+    WOWGROUNDRESULT ground;
+    WOWSWEEPRESULT trace;
+
+    test_wmo_fixture_enabled = true;
+    ASSERT(CM_LoadMapFormat("World/Maps/Azeroth/Azeroth.wdt"));
+    ASSERT(CM_WowQueryGround(&ground_query, &ground));
+    ASSERT_EQ_FLOAT(ground.height, 25.0f, 0.001f);
+    ASSERT_EQ_INT((int)ground.surface, WOW_SURFACE_WMO);
+    ASSERT(CM_WowSweepWorld(&sweep, &trace));
+    ASSERT(trace.fraction > 0.4f && trace.fraction < 0.5f);
+    ASSERT_EQ_INT((int)test_wmo_group_reads, 1);
     if (game->Shutdown) game->Shutdown();
 }
 
@@ -1527,6 +1775,8 @@ static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
 
 int main(void) {
     RUN_TEST(test_wow_ground_query_reads_artificial_adt);
+    RUN_TEST(test_wow_wmo_world_query_handles_floors_ramp_walls_and_door);
+    RUN_TEST(test_wow_wmo_collision_uses_logged_mopy_fallback_without_bsp);
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
     RUN_TEST(test_wow_action_commands_bind_three_server_abilities);

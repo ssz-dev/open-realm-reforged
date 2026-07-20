@@ -16,18 +16,83 @@ static void Wow_PhysicsSetAirborne(wowEntityLocal_t *local) {
     local->ground_surface = WOW_SURFACE_NONE;
 }
 
+/* Player and creature dimensions differ, but both enter the same vertical-capsule sweep contract. */
+static WOWSWEEPQUERY Wow_PhysicsSweepQuery(LPEDICT ent, LPCVECTOR3 start, LPCVECTOR2 displacement) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    FLOAT radius = local->kind == WOW_ENTITY_PLAYER ? BZ_WOW_PLAYER_COLLISION_RADIUS : MAX(0.5f, ent->s.radius);
+    FLOAT height = local->kind == WOW_ENTITY_PLAYER ? BZ_WOW_PLAYER_COLLISION_HEIGHT :
+        MAX(radius * 2.0f, radius * BZ_WOW_CREATURE_COLLISION_HEIGHT_SCALE);
+
+    return (WOWSWEEPQUERY){
+        .start = *start,
+        .displacement = { displacement->x, displacement->y, 0.0f },
+        .radius = radius,
+        .height = height,
+    };
+}
+
+/* Q2-style bounded bumps depenetrate first, then consume remaining motion along contact planes. */
+static BOOL Wow_PhysicsSweepMove(LPEDICT ent, LPCVECTOR2 displacement, LPVECTOR2 resolved) {
+    VECTOR3 position = ent->s.origin;
+    VECTOR2 remaining = *displacement;
+    BOOL moved = false;
+
+    *resolved = (VECTOR2){ 0.0f, 0.0f };
+    FOR_LOOP(bump, BZ_WOW_COLLISION_BUMPS) {
+        WOWSWEEPQUERY query = Wow_PhysicsSweepQuery(ent, &position, &remaining);
+        WOWSWEEPRESULT trace;
+        VECTOR2 normal;
+        FLOAT normal_length, into;
+
+        if (!CM_WowSweepWorld(&query, &trace)) {
+            position.x += remaining.x; position.y += remaining.y;
+            resolved->x += remaining.x; resolved->y += remaining.y;
+            moved |= fabsf(remaining.x) > 0.000001f || fabsf(remaining.y) > 0.000001f;
+            break;
+        }
+        normal = (VECTOR2){ trace.normal.x, trace.normal.y };
+        normal_length = Vector2_len(&normal);
+        if (normal_length <= 0.000001f) break;
+        normal = Vector2_scale(&normal, 1.0f / normal_length);
+        if (trace.start_solid) {
+            FLOAT push = trace.penetration + BZ_WOW_COLLISION_SKIN;
+
+            position.x += normal.x * push; position.y += normal.y * push;
+            resolved->x += normal.x * push; resolved->y += normal.y * push;
+            moved = true;
+            continue;
+        }
+        trace.fraction = MAX(0.0f, trace.fraction -
+            BZ_WOW_COLLISION_SKIN / MAX(Vector2_len(&remaining), BZ_WOW_COLLISION_SKIN));
+        position.x += remaining.x * trace.fraction; position.y += remaining.y * trace.fraction;
+        resolved->x += remaining.x * trace.fraction; resolved->y += remaining.y * trace.fraction;
+        moved |= trace.fraction > 0.0f;
+        remaining = Vector2_scale(&remaining, 1.0f - trace.fraction);
+        into = Vector2_dot(&remaining, &normal);
+        if (into < 0.0f) {
+            VECTOR2 clipped = Vector2_scale(&normal, into);
+            remaining = Vector2_sub(&remaining, &clipped);
+        }
+        if (Vector2_len(&remaining) <= 0.000001f) break;
+    }
+    return moved;
+}
+
 /* One bounded substep handles slope, step, snap, and analytic gravity integration. */
 static BOOL Wow_PhysicsStep(LPEDICT ent, LPCVECTOR2 displacement, FLOAT seconds) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
     VECTOR3 start = ent->s.origin;
+    VECTOR2 resolved;
+    BOOL swept = Wow_PhysicsSweepMove(ent, displacement, &resolved);
     WOWGROUNDQUERY query = {
-        .origin = { start.x + displacement->x, start.y + displacement->y, start.z },
+        .origin = { start.x + resolved.x, start.y + resolved.y, start.z },
         .max_down = BZ_WOW_GROUND_QUERY_DOWN,
         .max_up = BZ_WOW_GROUND_BLOCK_UP,
+        .max_walkable_up = BZ_WOW_STEP_HEIGHT,
     };
     WOWGROUNDRESULT ground;
     BOOL has_ground = CM_WowQueryGround(&query, &ground);
-    BOOL horizontal = fabsf(displacement->x) > 0.000001f || fabsf(displacement->y) > 0.000001f;
+    BOOL horizontal = fabsf(resolved.x) > 0.000001f || fabsf(resolved.y) > 0.000001f;
     FLOAT rise = has_ground ? ground.height - start.z : 0.0f;
 
     if (has_ground && (rise > BZ_WOW_STEP_HEIGHT || ground.normal.z < BZ_WOW_MAX_SLOPE_Z)) {
@@ -42,7 +107,7 @@ static BOOL Wow_PhysicsStep(LPEDICT ent, LPCVECTOR2 displacement, FLOAT seconds)
         ent->s.origin.z = ground.height;
         Wow_PhysicsSetGround(local, &ground);
         ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
-        return horizontal;
+        return swept && horizontal;
     }
 
     if (local->grounded) {
@@ -59,7 +124,7 @@ static BOOL Wow_PhysicsStep(LPEDICT ent, LPCVECTOR2 displacement, FLOAT seconds)
         Wow_PhysicsSetGround(local, &ground);
     }
     ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
-    return horizontal;
+    return swept && horizontal;
 }
 
 /* Spawn, respawn, and explicit relocation share the same bounded floor selection. */
@@ -67,14 +132,23 @@ BOOL Wow_PlaceEntityOnGround(LPEDICT ent, LPCVECTOR3 position) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
     WOWGROUNDQUERY query;
     WOWGROUNDRESULT ground;
+    VECTOR3 grounded;
+    WOWSWEEPQUERY overlap;
+    WOWSWEEPRESULT trace;
 
     if (!ent || !local || !position) return false;
     query = (WOWGROUNDQUERY){
         .origin = *position,
         .max_down = BZ_WOW_GROUND_PLACE_DOWN,
         .max_up = BZ_WOW_GROUND_PLACE_UP,
+        .max_walkable_up = BZ_WOW_STEP_HEIGHT,
     };
     if (!CM_WowQueryGround(&query, &ground)) return false;
+    grounded = *position;
+    grounded.z = ground.height;
+    overlap = Wow_PhysicsSweepQuery(ent, &grounded, &(VECTOR2){ 0.0f, 0.0f });
+    /* A floor alone is insufficient: respawns inside a MOBR wall must remain deferred. */
+    if (CM_WowSweepWorld(&overlap, &trace) && trace.start_solid) return false;
     ent->s.origin = *position;
     ent->s.origin2 = (VECTOR2){ position->x, position->y };
     ent->s.origin.z = ground.height;
@@ -99,6 +173,7 @@ BOOL Wow_MoveEntity(LPEDICT ent, LPCVECTOR2 displacement, FLOAT seconds) {
         }
         return false;
     }
+    if (Wow_EntityLocal(ent)->dead) return false;
     length = Vector2_len(displacement);
     countf = MAX(ceilf(length / BZ_WOW_MOVE_SUBSTEP), ceilf(seconds / BZ_WOW_TIME_SUBSTEP));
     if (countf > BZ_WOW_MAX_MOVE_SUBSTEPS) {

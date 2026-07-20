@@ -2,6 +2,7 @@
 #define __r_wowmap_h__
 
 #include "renderer/r_local.h"
+#include "common/wow_wmo_format.h"
 #include <strings.h>
 #include <stdlib.h>
 #include <float.h>
@@ -54,9 +55,7 @@ typedef struct wowM2Array_s {
     int32_t offset;
 } wowM2Array_t;
 
-typedef struct {
-    float x, y, z;
-} wowVec3_t;
+typedef WOWVEC3 wowVec3_t;
 
 typedef struct wowDoodadModel_s {
     PATHSTR path;
@@ -165,51 +164,12 @@ typedef struct {
     DWORD effect_id;
 } wowLayer_t;
 
-typedef struct {
-    DWORD name_id;
-    DWORD unique_id;
-    wowVec3_t position;
-    wowVec3_t rotation;
-    WORD scale;
-    WORD flags;
-} wowDoodadDef_t;
-
-typedef struct {
-    wowVec3_t min;
-    wowVec3_t max;
-} wowBox_t;
-
-typedef struct {
-    DWORD name_id;
-    DWORD unique_id;
-    wowVec3_t position;
-    wowVec3_t rotation;
-    wowBox_t extents;
-    WORD flags;
-    WORD doodad_set;
-    WORD name_set;
-    WORD unk;
-} wowMapObjDef_t;
-
-typedef struct {
-    BYTE flags;
-    BYTE material_id;
-} wowWmoPoly_t;
-
-typedef struct {
-    SHORT box_min[3];
-    SHORT box_max[3];
-    DWORD first_index;
-    WORD num_indices;
-    WORD first_vertex;
-    WORD last_vertex;
-    BYTE flags;
-    BYTE material_id;
-} wowWmoBatchDef_t;
-
-typedef struct {
-    float u, v;
-} wowVec2_t;
+typedef WOWDOODADDEF wowDoodadDef_t;
+typedef WOWBOX wowBox_t;
+typedef WOWMAPOBJDEF wowMapObjDef_t;
+typedef WOWWMOPOLY wowWmoPoly_t;
+typedef WOWWMOBATCHDEF wowWmoBatchDef_t;
+typedef WOWVEC2 wowVec2_t;
 
 typedef struct {
     DWORD id;
@@ -288,8 +248,6 @@ char **Wow_ParseStringBlock(BYTE const *data, DWORD size, LPDWORD out_count);
 LPCSTR Wow_StringRefFromOffsets(BYTE const *blob, DWORD blob_size, DWORD const *offsets, DWORD offset_count, DWORD id);
 VECTOR3 Wow_ObjectPoint(wowVec3_t p);
 void Wow_InstanceMatrix(wowMapObjDef_t const *def, LPMATRIX4 matrix);
-void Wow_GroupPath(LPCSTR root_path, DWORD group_index, LPSTR out, DWORD out_size);
-LPCSTR Wow_StringAt(LPCSTR blob, DWORD blob_size, DWORD offset);
 BOOL Wow_LoadWmoGroup(wowWmoModel_t *model, DWORD group_index, LPTEXTURE const *materials, DWORD material_count);
 BOOL Wow_LoadWmoModel(wowWmoModel_t *model);
 wowWmoModel_t *Wow_GetWmoModel(LPCSTR path);

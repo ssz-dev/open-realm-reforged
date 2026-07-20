@@ -153,6 +153,7 @@ test: test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB) | $(BIN_DIR)
 	@$(MAKE) test-sc2
 	@$(MAKE) test-wow-appearance
 	@$(MAKE) test-wow-physics
+	@$(MAKE) test-wow-wmo
 	@$(MAKE) test-wow-combat
 	@$(MAKE) test-wow-game
 	@$(MAKE) test-wow-hud
