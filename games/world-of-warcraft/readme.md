@@ -23,6 +23,8 @@ The `openwow` build is useful for testing terrain/model asset loading and render
   server-authoritative stat effects.
 - A complete server-authoritative kill quest with a neutral world quest giver, confirmed-kill progress, atomic
   XP/item turn-in, tracker, and quest-log state.
+- Versioned atomic local persistence for player level/XP/vitals, inventory, equipment, and quest progress, with safe
+  handling for missing, corrupt, and future save files.
 - Loading-screen UI with WoW textures, fonts, loading title/status text, and progress display.
 - DBC helpers for selected loading-screen and map metadata lookup.
 - Server-authored in-game HUD with a live player profile, ADT minimap, GM controls, quest tracker, and quest log.
@@ -37,7 +39,7 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 
 ## Not There Yet
 
-- Multiple quest chains, quest persistence, networking, or production server world rules.
+- Multiple quest chains, networking, or production server world rules.
 - Full DBC/DB2 coverage.
 - Full UI implementation beyond the loading-screen style shell.
 - Complete WMO, doodad, creature, particle, and animation fidelity.

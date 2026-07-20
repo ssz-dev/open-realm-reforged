@@ -8,7 +8,8 @@ LIB_DIR := build/lib
 CFLAGS  := -Wall -Wmisleading-indentation -fno-common -I. -Ishared -Ishared/types
 WOW_DIR := games/world-of-warcraft
 WOW_TEST_DIR := $(WOW_DIR)/tests
-WOW_GAMEPLAY_TEST_SRCS := $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/g_inventory.c $(WOW_DIR)/game/g_quest.c
+WOW_GAMEPLAY_TEST_SRCS := $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/g_inventory.c $(WOW_DIR)/game/g_quest.c \
+	$(WOW_DIR)/game/g_progress.c
 WOW_DATA_DIR := data/world-of-warcraft
 WOW_ISO_DIR ?= $(ISO_DIR)
 WOW_ISO_EXTRACT_DIR ?= build/wow-install

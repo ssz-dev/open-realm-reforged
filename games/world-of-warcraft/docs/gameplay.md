@@ -129,3 +129,31 @@ At four kills the counter clamps and becomes ready for turn-in.
 Turn-in first inserts the complete item reward through the existing copied-bag `Wow_GiveItem` path. Only a successful
 insert commits completion and calls the central `Wow_AwardXp`; therefore a full bag leaves the quest ready, grants no
 XP, and cannot create a partial or duplicate reward. Quest tests use synthetic entities and fixed item/quest IDs only.
+
+## Persistent Player Progress
+
+`g_progress.c` snapshots only the authoritative local player's RPG state: level, XP, current/max health, Rage, the
+six bag stacks, weapon and armor equipment, and the first quest's state and count. Edict pointers, aggro, cooldowns,
+corpse loot, NPC health/AI, renderer handles, and asset data never enter the save.
+
+The committed OpenWoW config selects `share/openwow-progress.sav` through the archived `wow_save` cvar. This uses the
+same writable local `share/` area as the existing user config and stays outside `data/`; the save and its temporary
+file are ignored by Git. The path remains relative and can be overridden for diagnostics.
+
+The text schema starts with `OPENWOW_PROGRESS 1`. Loading parses into a detached snapshot, rejects malformed or future
+versions, validates stable item/quest IDs and structural limits, and clamps current health and Rage before applying
+the snapshot. Equipment must refer to a correctly typed item present in the loaded bag. A missing file keeps the
+normal new-player defaults. A rejected file disables automatic saving for that session so shutdown cannot overwrite
+corrupt evidence or data from a future version.
+
+Saving writes `<wow_save>.tmp`, flushes and synchronizes it, then atomically renames it over the destination. Progress
+loads during player initialization, saves on regular shutdown and before a map transition, and can be controlled from
+the runtime console:
+
+```text
+cmd save_progress
+cmd reset_progress confirm
+```
+
+The confirmed reset writes the same default snapshot used for a new player before applying it to runtime. Save/load
+tests use small text fixtures under `build/tests/`; they never read the real WoW archives or `data/`.

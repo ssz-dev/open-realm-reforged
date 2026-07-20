@@ -729,6 +729,15 @@ void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD val
         case WOW_COMBAT_MESSAGE_QUEST_NOT_READY:
             snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Quest not ready here");
             break;
+        case WOW_COMBAT_MESSAGE_PROGRESS_SAVED:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Progress saved");
+            break;
+        case WOW_COMBAT_MESSAGE_PROGRESS_RESET:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Progress reset");
+            break;
+        case WOW_COMBAT_MESSAGE_PROGRESS_SAVE_FAILED:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Progress save failed");
+            break;
         default:
             client->combat_message.time = 0;
             client->combat_message.text[0] = '\0';
@@ -1099,9 +1108,6 @@ static void Wow_InitPlayer(LPEDICT ent) {
         local->hostile = false;
         local->home = wow_spawn_origin;
         local->yaw = wow_move.yaw;
-        local->health = local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
-        local->max_power = BZ_WOW_PLAYER_MAX_POWER;
-        local->level = 1;
         local->attack_damage = BZ_WOW_STRIKE_DAMAGE;
         local->attack_damage_point = 250;
         local->attack_backswing = 450;
@@ -1128,7 +1134,6 @@ static void Wow_InitPlayer(LPEDICT ent) {
     ent->run = NULL;
     ent->attack = Wow_AIAttack;
     ent->pain = Wow_AIPain;
-    Wow_SyncEntityVitals(ent);
     Wow_SetStandMove(ent);
 
     ps = &ent->client->ps;
@@ -1136,14 +1141,14 @@ static void Wow_InitPlayer(LPEDICT ent) {
     ps->number = 0;
     ps->start_location = wow_spawn_location;
     snprintf(wow_clients[0].name, sizeof(wow_clients[0].name), "%s", "Thrall");
-    memset(wow_clients[0].bag, 0, sizeof(wow_clients[0].bag));
-    memset(wow_clients[0].equipment, 0, sizeof(wow_clients[0].equipment));
     memset(wow_clients[0].inventory, 0, sizeof(wow_clients[0].inventory));
     memset(&wow_clients[0].combat_message, 0, sizeof(wow_clients[0].combat_message));
     wow_clients[0].equipment_text[0] = '\0';
     wow_clients[0].loot_target = 0;
     wow_clients[0].ui_flags = 0;
-    Wow_InitQuestProgress(ent);
+    wow_clients[0].quest_log_open = false;
+    Wow_ResetPlayerProgress(ent);
+    (void)Wow_LoadPlayerProgress(ent);
     memcpy(wow_clients[0].actions, wow_start_actions, sizeof(wow_start_actions));
     FOR_LOOP(i, WOW_ABILITY_COUNT) {
         wowHudIcon_t *icon = &wow_clients[0].actions[i];
@@ -1179,6 +1184,7 @@ static void Wow_Init(void) {
     memset(wow_entity_locals, 0, sizeof(wow_entity_locals));
     memset(wow_clients, 0, sizeof(wow_clients));
     wow_move.gm = false;
+    Wow_InitProgressPersistence();
 
     globals.edicts = wow_edicts;
     globals.max_edicts = WOW_MAX_EDICTS;
@@ -1188,6 +1194,8 @@ static void Wow_Init(void) {
 }
 
 static void Wow_Shutdown(void) {
+    if (wow_edicts[0].inuse && wow_edicts[0].client)
+        (void)Wow_AutoSavePlayerProgress(&wow_edicts[0]);
     G_FreeModels();
     globals.edicts = NULL;
     globals.num_edicts = 0;
@@ -1196,6 +1204,9 @@ static void Wow_Shutdown(void) {
 static void Wow_SpawnEntities(void);
 
 static bool Wow_LoadMap(LPCSTR mapFilename) {
+    if (wow_edicts[0].inuse && wow_edicts[0].client &&
+        !Wow_AutoSavePlayerProgress(&wow_edicts[0]))
+        fprintf(stderr, "OpenWoW progress: map transition autosave failed\n");
     if (!CM_LoadMap(mapFilename)) {
         return false;
     }
@@ -1571,6 +1582,16 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
 
         fprintf(stderr, "OpenWoW Quest: %s state=%u progress=%u\n",
                 def ? def->key : "none", (unsigned)client->quest.state, (unsigned)client->quest.count);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "save_progress")) {
+        Wow_SetCombatMessage(ent, Wow_SavePlayerProgress(ent)
+            ? WOW_COMBAT_MESSAGE_PROGRESS_SAVED : WOW_COMBAT_MESSAGE_PROGRESS_SAVE_FAILED, 0);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "reset_progress")) {
+        if (argc != 2 || strcasecmp(argv[1], "confirm")) {
+            fprintf(stderr, "OpenWoW progress: usage: reset_progress confirm\n");
+            return;
+        }
+        Wow_SetCombatMessage(ent, Wow_ResetSavedProgress(ent)
+            ? WOW_COMBAT_MESSAGE_PROGRESS_RESET : WOW_COMBAT_MESSAGE_PROGRESS_SAVE_FAILED, 0);
     }
 }
 

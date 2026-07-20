@@ -104,6 +104,9 @@ typedef enum {
     WOW_COMBAT_MESSAGE_QUEST_READY,
     WOW_COMBAT_MESSAGE_QUEST_COMPLETED,
     WOW_COMBAT_MESSAGE_QUEST_NOT_READY,
+    WOW_COMBAT_MESSAGE_PROGRESS_SAVED,
+    WOW_COMBAT_MESSAGE_PROGRESS_RESET,
+    WOW_COMBAT_MESSAGE_PROGRESS_SAVE_FAILED,
 } wowCombatMessageType_t;
 
 typedef enum {
@@ -149,6 +152,15 @@ typedef enum {
 typedef enum {
     WOW_QUEST_OBJECTIVE_KILL,
 } wowQuestObjective_t;
+
+typedef enum {
+    WOW_PROGRESS_LOAD_DISABLED,
+    WOW_PROGRESS_LOAD_MISSING,
+    WOW_PROGRESS_LOAD_OK,
+    WOW_PROGRESS_LOAD_INVALID,
+    WOW_PROGRESS_LOAD_UNSUPPORTED,
+    WOW_PROGRESS_LOAD_IO_ERROR,
+} wowProgressLoadResult_t;
 
 typedef struct {
     wowItemId_t item;
@@ -360,6 +372,12 @@ BOOL Wow_AcceptQuest(LPEDICT player, LPEDICT giver, wowQuestId_t quest);
 void Wow_QuestCreatureKilled(LPEDICT player, LPEDICT victim);
 BOOL Wow_TurnInQuest(LPEDICT player, LPEDICT giver, wowQuestId_t quest);
 BOOL Wow_UpdateQuestUiState(LPEDICT player);
+void Wow_InitProgressPersistence(void);
+void Wow_ResetPlayerProgress(LPEDICT player);
+wowProgressLoadResult_t Wow_LoadPlayerProgress(LPEDICT player);
+BOOL Wow_SavePlayerProgress(LPEDICT player);
+BOOL Wow_AutoSavePlayerProgress(LPEDICT player);
+BOOL Wow_ResetSavedProgress(LPEDICT player);
 BOOL Wow_SetStandMove(LPEDICT ent);
 BOOL Wow_SetRunMove(LPEDICT ent);
 BOOL Wow_SetWalkMove(LPEDICT ent);

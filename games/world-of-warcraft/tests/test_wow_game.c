@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "game/g_wow_local.h"
 
@@ -33,6 +35,9 @@ static DWORD test_hud_write_calls;
 static DWORD test_quest_show_calls;
 static DWORD test_quest_hide_calls;
 static char test_last_error[512];
+static char test_save_path[MAX_PATHLEN];
+
+#define TEST_PROGRESS_PATH "build/tests/openwow-progress-test.sav"
 
 /* ---- configstring stubs (game_import.configstring / GetConfigstring) ---- */
 #define TEST_CONFIGSTRINGS 128
@@ -54,7 +59,7 @@ static LPCSTR test_get_configstring(DWORD index) {
 
 /* ---- cvar stub ---- */
 static LPCSTR test_cvar_string(LPCSTR name, LPCSTR fallback) {
-    (void)name;
+    if (name && !strcasecmp(name, "wow_save")) return test_save_path;
     return fallback ? fallback : "";
 }
 
@@ -459,6 +464,42 @@ static DWORD test_inventory_count(wowClient_t const *client, wowItemId_t item) {
     return count;
 }
 
+static void test_progress_paths_clear(void) {
+    char temporary[MAX_PATHLEN];
+
+    snprintf(temporary, sizeof(temporary), "%s.tmp", TEST_PROGRESS_PATH);
+    remove(temporary);
+    rmdir(temporary);
+    remove(TEST_PROGRESS_PATH);
+}
+
+static void test_progress_path_enable(void) {
+    test_progress_paths_clear();
+    snprintf(test_save_path, sizeof(test_save_path), "%s", TEST_PROGRESS_PATH);
+}
+
+static void test_write_local_file(LPCSTR path, LPCSTR text) {
+    FILE *file = fopen(path, "wb");
+    size_t length = strlen(text);
+
+    ASSERT_NOT_NULL(file);
+    if (!file) return;
+    ASSERT_EQ_INT((int)fwrite(text, 1, length, file), (int)length);
+    ASSERT_EQ_INT(fclose(file), 0);
+}
+
+static void test_read_local_file(LPCSTR path, LPSTR out, DWORD out_size) {
+    FILE *file = fopen(path, "rb");
+    size_t size;
+
+    ASSERT_NOT_NULL(file);
+    if (!file || !out || out_size < 2) return;
+    size = fread(out, 1, out_size - 1, file);
+    out[size] = '\0';
+    ASSERT(!ferror(file));
+    ASSERT_EQ_INT(fclose(file), 0);
+}
+
 int G_RegisterModel(LPCSTR filename) {
     return gi.ModelIndex(filename);
 }
@@ -497,6 +538,7 @@ static void reset_test_state(void) {
     test_quest_hide_calls = 0;
     memset(test_last_error, 0, sizeof(test_last_error));
     memset(test_configstrings, 0, sizeof(test_configstrings));
+    test_save_path[0] = '\0';
 }
 
 static void assert_player_ui_payload(void) {
@@ -1114,6 +1156,305 @@ static void test_wow_player_progression_refreshes_live_hud_once(void) {
     if (game->Shutdown) game->Shutdown();
 }
 
+static void test_wow_progress_missing_save_and_confirmed_reset_use_defaults(void) {
+    struct game_export *game = init_game();
+    LPCSTR save_argv[] = { "save_progress" };
+    LPCSTR reset_argv[] = { "reset_progress" };
+    LPCSTR confirm_argv[] = { "reset_progress", "confirm" };
+    LPEDICT player;
+    wowEntityLocal_t *local;
+    wowClient_t *client;
+
+    test_progress_path_enable();
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    local = Wow_EntityLocal(player);
+    client = (wowClient_t *)player->client;
+    ASSERT_EQ_INT((int)local->level, 1);
+    ASSERT_EQ_INT((int)local->health, BZ_WOW_PLAYER_BASE_HEALTH);
+    ASSERT_EQ_INT(access(TEST_PROGRESS_PATH, F_OK), -1);
+
+    local->level = 2;
+    local->xp = 75;
+    local->health = local->max_health = 110;
+    client->quest.state = WOW_QUEST_ACTIVE;
+    client->quest.count = 2;
+    game->ClientCommand(player, 1, save_argv);
+    ASSERT_EQ_INT(access(TEST_PROGRESS_PATH, F_OK), 0);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_PROGRESS_SAVED);
+    ASSERT_STR_EQ(client->combat_message.text, "Progress saved");
+
+    game->ClientCommand(player, 1, reset_argv);
+    ASSERT_EQ_INT((int)local->level, 2);
+    ASSERT_EQ_INT((int)client->quest.count, 2);
+    game->ClientCommand(player, 2, confirm_argv);
+    ASSERT_EQ_INT((int)local->level, 1);
+    ASSERT_EQ_INT((int)local->xp, 0);
+    ASSERT_EQ_INT((int)local->health, BZ_WOW_PLAYER_BASE_HEALTH);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_AVAILABLE);
+    ASSERT_EQ_INT((int)client->quest.count, 0);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_PROGRESS_RESET);
+    ASSERT_STR_EQ(client->combat_message.text, "Progress reset");
+
+    local->level = 2;
+    local->max_health = 110;
+    local->health = 1;
+    ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(player), WOW_PROGRESS_LOAD_OK);
+    ASSERT_EQ_INT((int)local->level, 1);
+    ASSERT_EQ_INT((int)local->health, BZ_WOW_PLAYER_BASE_HEALTH);
+    test_save_path[0] = '\0';
+    if (game->Shutdown) game->Shutdown();
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_round_trip_restores_rpg_state_not_transients(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, creature;
+    wowEntityLocal_t *local, *creature_local;
+    wowClient_t *client;
+
+    test_progress_path_enable();
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    creature = first_creature();
+    local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    client = (wowClient_t *)player->client;
+    local->level = 2;
+    local->xp = 123;
+    local->health = 77;
+    local->max_health = 110;
+    local->power = 42;
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_MINOR_HEALING_POTION, 4));
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_TRAINING_SWORD, 1));
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_PADDED_ARMOR, 1));
+    ASSERT(Wow_UseInventorySlot(player, 1));
+    ASSERT(Wow_UseInventorySlot(player, 2));
+    client->quest.state = WOW_QUEST_ACTIVE;
+    client->quest.count = 2;
+    local->enemy = creature;
+    local->ability_cooldown[WOW_ABILITY_THROW] = 900;
+    creature_local->ai_state = WOW_AI_AGGRO;
+    creature_local->health = 1;
+    ASSERT(Wow_SavePlayerProgress(player));
+    ASSERT_EQ_INT(access(TEST_PROGRESS_PATH ".tmp", F_OK), -1);
+
+    Wow_ResetPlayerProgress(player);
+    creature_local->ai_state = WOW_AI_EVADE;
+    creature_local->health = 2;
+    ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(player), WOW_PROGRESS_LOAD_OK);
+    ASSERT_EQ_INT((int)local->level, 2);
+    ASSERT_EQ_INT((int)local->xp, 123);
+    ASSERT_EQ_INT((int)local->health, 77);
+    ASSERT_EQ_INT((int)local->max_health, 110);
+    ASSERT_EQ_INT((int)local->power, 42);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 4);
+    ASSERT_EQ_INT((int)client->equipment[WOW_EQUIPMENT_WEAPON], WOW_ITEM_TRAINING_SWORD);
+    ASSERT_EQ_INT((int)client->equipment[WOW_EQUIPMENT_ARMOR], WOW_ITEM_PADDED_ARMOR);
+    ASSERT_EQ_INT((int)Wow_PlayerWeaponBonus(player), 1);
+    ASSERT_EQ_INT((int)Wow_AdjustIncomingDamage(player, 3), 2);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_ACTIVE);
+    ASSERT_EQ_INT((int)client->quest.count, 2);
+    ASSERT_NULL(local->enemy);
+    ASSERT_EQ_INT((int)local->ability_cooldown[WOW_ABILITY_THROW], 0);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_EVADE);
+    ASSERT_EQ_INT((int)creature_local->health, 2);
+
+    test_save_path[0] = '\0';
+    if (game->Shutdown) game->Shutdown();
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_load_clamps_health_and_rage(void) {
+    static LPCSTR const over_limit =
+        "OPENWOW_PROGRESS 1\n"
+        "player 2 50\n"
+        "vitals 999 110 999\n"
+        "bag 6\n"
+        "slot 0 0 0\nslot 1 0 0\nslot 2 0 0\n"
+        "slot 3 0 0\nslot 4 0 0\nslot 5 0 0\n"
+        "equipment 0 0\n"
+        "quest 1 2 2\n"
+        "end\n";
+    struct game_export *game = init_game();
+    wowEntityLocal_t *local;
+
+    test_progress_path_enable();
+    test_write_local_file(TEST_PROGRESS_PATH, over_limit);
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    local = Wow_EntityLocal(&wow_edicts[0]);
+    ASSERT_EQ_INT((int)local->level, 2);
+    ASSERT_EQ_INT((int)local->xp, 50);
+    ASSERT_EQ_INT((int)local->max_health, 110);
+    ASSERT_EQ_INT((int)local->health, 110);
+    ASSERT_EQ_INT((int)local->power, BZ_WOW_PLAYER_MAX_POWER);
+    test_save_path[0] = '\0';
+    if (game->Shutdown) game->Shutdown();
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_rejects_corrupt_unknown_items_and_future_versions(void) {
+    static LPCSTR const unknown_item =
+        "OPENWOW_PROGRESS 1\n"
+        "player 1 0\n"
+        "vitals 100 100 0\n"
+        "bag 6\n"
+        "slot 0 99 1\nslot 1 0 0\nslot 2 0 0\n"
+        "slot 3 0 0\nslot 4 0 0\nslot 5 0 0\n"
+        "equipment 0 0\n"
+        "quest 1 1 0\n"
+        "end\n";
+    struct game_export *game = init_game();
+    char text[512] = { 0 };
+    wowEntityLocal_t *local;
+
+    test_progress_path_enable();
+    test_write_local_file(TEST_PROGRESS_PATH, "broken save\n");
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    local = Wow_EntityLocal(&wow_edicts[0]);
+    ASSERT_EQ_INT((int)local->level, 1);
+    ASSERT_EQ_INT((int)local->health, BZ_WOW_PLAYER_BASE_HEALTH);
+    ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(&wow_edicts[0]), WOW_PROGRESS_LOAD_INVALID);
+    test_write_local_file(TEST_PROGRESS_PATH, unknown_item);
+    ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(&wow_edicts[0]), WOW_PROGRESS_LOAD_INVALID);
+    if (game->Shutdown) game->Shutdown();
+    test_read_local_file(TEST_PROGRESS_PATH, text, sizeof(text));
+    ASSERT_STR_EQ(text, unknown_item);
+    test_progress_paths_clear();
+
+    game = init_game();
+    test_progress_path_enable();
+    test_write_local_file(TEST_PROGRESS_PATH, "OPENWOW_PROGRESS 2\n");
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(&wow_edicts[0]), WOW_PROGRESS_LOAD_UNSUPPORTED);
+    if (game->Shutdown) game->Shutdown();
+    memset(text, 0, sizeof(text));
+    test_read_local_file(TEST_PROGRESS_PATH, text, sizeof(text));
+    ASSERT_STR_EQ(text, "OPENWOW_PROGRESS 2\n");
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_completed_quest_cannot_reward_again_after_load(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, giver;
+    wowEntityLocal_t *local;
+    wowClient_t *client;
+
+    test_progress_path_enable();
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    giver = quest_giver();
+    local = Wow_EntityLocal(player);
+    client = (wowClient_t *)player->client;
+    local->xp = 150;
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_MINOR_HEALING_POTION, 1));
+    client->quest.state = WOW_QUEST_COMPLETED;
+    client->quest.count = Wow_QuestDef(WOW_QUEST_FIRST_HUNT)->required_count;
+    ASSERT(Wow_SavePlayerProgress(player));
+    Wow_ResetPlayerProgress(player);
+    ASSERT_EQ_INT((int)Wow_LoadPlayerProgress(player), WOW_PROGRESS_LOAD_OK);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_COMPLETED);
+    ASSERT_EQ_INT((int)client->quest.count, 4);
+    ASSERT(!Wow_TurnInQuest(player, giver, WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)local->xp, 150);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 1);
+
+    test_save_path[0] = '\0';
+    if (game->Shutdown) game->Shutdown();
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_atomic_save_preserves_target_when_temp_write_fails(void) {
+    struct game_export *game = init_game();
+    char temporary[MAX_PATHLEN];
+    char text[64] = { 0 };
+
+    test_progress_path_enable();
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    test_write_local_file(TEST_PROGRESS_PATH, "original snapshot\n");
+    snprintf(temporary, sizeof(temporary), "%s.tmp", TEST_PROGRESS_PATH);
+    ASSERT_EQ_INT(mkdir(temporary, 0700), 0);
+    ASSERT(!Wow_SavePlayerProgress(&wow_edicts[0]));
+    test_read_local_file(TEST_PROGRESS_PATH, text, sizeof(text));
+    ASSERT_STR_EQ(text, "original snapshot\n");
+
+    test_save_path[0] = '\0';
+    if (game->Shutdown) game->Shutdown();
+    ASSERT_EQ_INT(rmdir(temporary), 0);
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_regular_shutdown_autosaves_for_next_start(void) {
+    struct game_export *game = init_game();
+    wowEntityLocal_t *local;
+    wowClient_t *client;
+
+    test_progress_path_enable();
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    local = Wow_EntityLocal(&wow_edicts[0]);
+    client = (wowClient_t *)wow_edicts[0].client;
+    local->level = 3;
+    local->xp = 75;
+    local->health = 66;
+    local->max_health = 120;
+    local->power = 33;
+    ASSERT(Wow_GiveItem(&wow_edicts[0], WOW_ITEM_MINOR_HEALING_POTION, 5));
+    client->quest.state = WOW_QUEST_READY_TO_TURN_IN;
+    client->quest.count = 4;
+    if (game->Shutdown) game->Shutdown();
+    ASSERT_EQ_INT(access(TEST_PROGRESS_PATH, F_OK), 0);
+
+    game = init_game();
+    snprintf(test_save_path, sizeof(test_save_path), "%s", TEST_PROGRESS_PATH);
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    local = Wow_EntityLocal(&wow_edicts[0]);
+    client = (wowClient_t *)wow_edicts[0].client;
+    ASSERT_EQ_INT((int)local->level, 3);
+    ASSERT_EQ_INT((int)local->xp, 75);
+    ASSERT_EQ_INT((int)local->health, 66);
+    ASSERT_EQ_INT((int)local->max_health, 120);
+    ASSERT_EQ_INT((int)local->power, 33);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 5);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_READY_TO_TURN_IN);
+    ASSERT_EQ_INT((int)client->quest.count, 4);
+    if (game->Shutdown) game->Shutdown();
+    test_progress_paths_clear();
+}
+
+static void test_wow_progress_map_transition_preserves_current_snapshot(void) {
+    struct game_export *game = init_game();
+    wowEntityLocal_t *local;
+    wowClient_t *client;
+
+    test_progress_path_enable();
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    local = Wow_EntityLocal(&wow_edicts[0]);
+    client = (wowClient_t *)wow_edicts[0].client;
+    local->level = 2;
+    local->xp = 91;
+    local->health = 80;
+    local->max_health = 110;
+    local->power = 17;
+    ASSERT(Wow_GiveItem(&wow_edicts[0], WOW_ITEM_MINOR_HEALING_POTION, 3));
+    client->quest.state = WOW_QUEST_ACTIVE;
+    client->quest.count = 1;
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    local = Wow_EntityLocal(&wow_edicts[0]);
+    client = (wowClient_t *)wow_edicts[0].client;
+    ASSERT_EQ_INT((int)local->level, 2);
+    ASSERT_EQ_INT((int)local->xp, 91);
+    ASSERT_EQ_INT((int)local->health, 80);
+    ASSERT_EQ_INT((int)local->max_health, 110);
+    ASSERT_EQ_INT((int)local->power, 17);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 3);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_ACTIVE);
+    ASSERT_EQ_INT((int)client->quest.count, 1);
+
+    test_save_path[0] = '\0';
+    if (game->Shutdown) game->Shutdown();
+    test_progress_paths_clear();
+}
+
 int main(void) {
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
@@ -1127,5 +1468,13 @@ int main(void) {
     RUN_TEST(test_wow_quest_log_commands_toggle_server_ui);
     RUN_TEST(test_wow_zone_name_tracks_player_area);
     RUN_TEST(test_wow_player_progression_refreshes_live_hud_once);
+    RUN_TEST(test_wow_progress_missing_save_and_confirmed_reset_use_defaults);
+    RUN_TEST(test_wow_progress_round_trip_restores_rpg_state_not_transients);
+    RUN_TEST(test_wow_progress_load_clamps_health_and_rage);
+    RUN_TEST(test_wow_progress_rejects_corrupt_unknown_items_and_future_versions);
+    RUN_TEST(test_wow_progress_completed_quest_cannot_reward_again_after_load);
+    RUN_TEST(test_wow_progress_atomic_save_preserves_target_when_temp_write_fails);
+    RUN_TEST(test_wow_progress_regular_shutdown_autosaves_for_next_start);
+    RUN_TEST(test_wow_progress_map_transition_preserves_current_snapshot);
     TEST_RESULTS();
 }
