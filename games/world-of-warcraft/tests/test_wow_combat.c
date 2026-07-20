@@ -151,9 +151,13 @@ static void test_prepare_pair(LPEDICT *attacker_out, LPEDICT *target_out) {
     target_local = Wow_EntityLocal(target);
     attacker_local->kind = WOW_ENTITY_CREATURE;
     attacker_local->health = 5;
+    attacker_local->max_health = 5;
+    attacker_local->level = 1;
     attacker_local->enemy = target;
     target_local->kind = WOW_ENTITY_CREATURE;
     target_local->health = 3;
+    target_local->max_health = 3;
+    target_local->level = 1;
 
     *attacker_out = attacker;
     *target_out = target;
@@ -260,11 +264,104 @@ static void test_wow_death_holds_terminal_frame(void) {
     ASSERT_EQ_INT((int)target->s.frame, (int)(g_death_anim.interval[1] - 1));
 }
 
+static void test_wow_vitals_publish_living_health_fraction(void) {
+    LPEDICT attacker;
+    LPEDICT target;
+    wowEntityLocal_t *local;
+
+    test_prepare_pair(&attacker, &target);
+    local = Wow_EntityLocal(target);
+    Wow_SyncEntityVitals(target);
+    ASSERT_EQ_INT((int)target->s.stats[ENT_HEALTH], 255);
+    local->health = 2;
+    Wow_SyncEntityVitals(target);
+    ASSERT_EQ_INT((int)target->s.stats[ENT_HEALTH], 170);
+    Wow_AIDie(target, attacker);
+    ASSERT_EQ_INT((int)target->s.stats[ENT_HEALTH], 0);
+}
+
+static void test_wow_player_kill_grants_xp_and_levels_with_overflow(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+
+    test_prepare_pair(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    ASSERT_EQ_INT((int)Wow_XpForNextLevel(0), 0);
+    ASSERT_EQ_INT((int)Wow_XpForNextLevel(1), 400);
+    ASSERT_EQ_INT((int)Wow_XpForNextLevel(2), 900);
+    ASSERT_EQ_INT((int)Wow_XpForNextLevel(BZ_WOW_MAX_LEVEL), 0);
+    player_local->kind = WOW_ENTITY_PLAYER;
+    player_local->health = player_local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
+    player_local->max_power = BZ_WOW_PLAYER_MAX_POWER;
+    player_local->level = 1;
+    player_local->xp = 350;
+    creature_local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    Wow_AIDie(creature, player);
+    ASSERT_EQ_INT((int)player_local->level, 2);
+    ASSERT_EQ_INT((int)player_local->xp, 50);
+    ASSERT_EQ_INT((int)player_local->max_health, 110);
+    ASSERT_EQ_INT((int)player_local->health, 110);
+    ASSERT_EQ_INT((int)player_local->power, BZ_WOW_PLAYER_MAX_POWER);
+    Wow_AIDie(creature, player);
+    ASSERT_EQ_INT((int)player_local->xp, 50);
+}
+
+static void test_wow_projectile_kill_credits_player_caster(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    LPEDICT projectile = &wow_edicts[2];
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+    wowEntityLocal_t *projectile_local;
+
+    test_prepare_pair(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    projectile_local = Wow_EntityLocal(projectile);
+    player_local->kind = WOW_ENTITY_PLAYER;
+    player_local->level = 1;
+    creature_local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    projectile->inuse = true;
+    projectile->s.number = 2;
+    projectile_local->kind = WOW_ENTITY_PROJECTILE;
+    projectile_local->projectile_caster = 0;
+    Wow_AIDie(creature, projectile);
+    ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+}
+
+static void test_wow_combat_generates_player_resource(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+
+    test_prepare_pair(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    player_local->kind = WOW_ENTITY_PLAYER;
+    player_local->max_power = BZ_WOW_PLAYER_MAX_POWER;
+    Wow_DealDamage(creature, player, 1);
+    ASSERT_EQ_INT((int)player_local->power, 5);
+    ASSERT_EQ_INT((int)player->s.stats[ENT_MANA], 13);
+    ASSERT_EQ_INT((int)creature_local->health, 2);
+    ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 170);
+    player_local->power = 98;
+    Wow_DealDamage(creature, player, 1);
+    ASSERT_EQ_INT((int)player_local->power, BZ_WOW_PLAYER_MAX_POWER);
+}
+
 int main(void) {
     RUN_TEST(test_wow_attack_applies_damage_after_damage_point);
     RUN_TEST(test_wow_attack_uses_explicit_timing_over_animation_split);
     RUN_TEST(test_wow_attack_lethal_triggers_death_state);
     RUN_TEST(test_wow_dead_entity_ignores_pain_and_attack);
     RUN_TEST(test_wow_death_holds_terminal_frame);
+    RUN_TEST(test_wow_vitals_publish_living_health_fraction);
+    RUN_TEST(test_wow_player_kill_grants_xp_and_levels_with_overflow);
+    RUN_TEST(test_wow_projectile_kill_credits_player_caster);
+    RUN_TEST(test_wow_combat_generates_player_resource);
     TEST_RESULTS();
 }

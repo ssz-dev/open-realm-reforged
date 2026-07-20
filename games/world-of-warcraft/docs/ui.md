@@ -16,6 +16,23 @@ of the square map and includes an unused title strip. The replacement header dis
 The server reads the active ADT chunk's MCNK area ID and resolves its English name through `AreaTable.dbc`; it refreshes
 the HUD only when that name changes.
 
+## Player Profile And Progression
+
+The existing upper-left targeting-frame art contains three live status bars:
+
+- Health is green and displays current/max health.
+- Rage is red, starts at zero, and is generated when the player deals or receives damage.
+- XP is purple and displays progress toward the next level.
+
+All values are owned by `wowEntityLocal_t`, copied into `playerState_t.stats`, and written into the server-authored HUD.
+The HUD layout is rebuilt only when a displayed value changes. Players start at level 1 with 100 health; each level
+adds 10 maximum health. The current minimal progression curve requires `400 + (level - 1) * 500` XP and preserves
+overflow XP. This scaffold is intentionally server-side so an authoritative progression table can replace the curve.
+
+Ambient creatures currently start at level 1 with 3 health and award 100 XP. Their normalized health is published in
+`entityState_t.stats[ENT_HEALTH]`, so the existing renderer shows a live overhead bar for the selected or hovered NPC
+and for all living NPCs while Alt is held. Dead NPCs publish zero and therefore no longer draw a bar.
+
 ## Quest Log
 
 The console layer sends `questlog toggle` from the book button. The server accepts:

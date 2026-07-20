@@ -195,7 +195,9 @@ static void Wow_MonsterStart(LPEDICT ent,
     local->patrol_radius = patrol_radius;
     local->patrol_phase = (FLOAT)DEG2RAD(yaw);
     local->walk_speed = walk_speed;
-    local->health = 3;
+    local->health = local->max_health = BZ_WOW_CREATURE_BASE_HEALTH;
+    local->level = 1;
+    local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
     local->attack_damage_point = 250;
     local->attack_backswing = 450;
     ent->svflags |= SVF_MONSTER;
@@ -207,6 +209,7 @@ static void Wow_MonsterStart(LPEDICT ent,
     ent->pain = Wow_AIPain;
     ent->s.flags = EF_GROUND_ANCHOR;
     ent->s.angle = (FLOAT)DEG2RAD(yaw);
+    Wow_SyncEntityVitals(ent);
     if (patrol_radius > 0.0f) {
         Wow_SetWalkMove(ent);
     } else {

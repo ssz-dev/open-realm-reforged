@@ -16,10 +16,10 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 - WDT map entry path through the selected game module.
 - ADT-oriented terrain renderer code for map tiles, splats, alpha layers, terrain state, and object paths.
 - M2 model loading/rendering path, including fallback handling for missing models.
-- Basic creature/entity scaffolding and model registration paths.
+- Basic creature/entity combat with networked health, player rage, XP, and level progression.
 - Loading-screen UI with WoW textures, fonts, loading title/status text, and progress display.
 - DBC helpers for selected loading-screen and map metadata lookup.
-- Server-authored in-game HUD with a live ADT minimap, GM exploration controls, and an interactive empty quest log.
+- Server-authored in-game HUD with a live player profile, ADT minimap, GM controls, and an interactive empty quest log.
 - Build integration through `make openwow`.
 
 ## Partial

@@ -200,14 +200,7 @@ void SCR_LayoutDrawStatusbar(LPCUIFRAME frame, LPCRECT screen) {
 }
 
 void SCR_LayoutDrawTexture(LPCUIFRAME frame, LPCRECT screen) {
-    if (!frame->tex.index) {
-        static BOOL logged_zero_texture;
-        if (!logged_zero_texture && frame->color.a && memcmp(&frame->color, &COLOR32_WHITE, sizeof(frame->color))) {
-            logged_zero_texture = true;
-            fprintf(stderr, "WOW_HUD_BAR_DIAG skipped colored texture frame with image index 0\n");
-        }
-        return;  /* unresolved texture — skip to avoid drawing cl.pics[0] */
-    }
+    if (!frame->tex.index) return;  /* unresolved texture — skip to avoid drawing cl.pics[0] */
     LPCTEXTURE tex = cl.pics[frame->tex.index];
     if (frame->stat >= MAX_STATS && frame->stat - MAX_STATS < MAX_STATS) {
         LPCSTR resource = cl.playerstate.texts[frame->stat - MAX_STATS];

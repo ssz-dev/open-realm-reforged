@@ -16,6 +16,7 @@
 #define PW(w) ((w) / VW)
 #define PH(h) ((h) / VH)
 #define HUD_FONT_SIZE 10
+#define WOW_STATUS_BAR "Interface\\TargetingFrame\\UI-StatusBar.blp"
 
 typedef struct {
     LPCSTR path;
@@ -113,30 +114,30 @@ static void UI_WriteImageButton(wowHudButton_t const *button) {
     UI_WriteProxyFrame(&frame, &uv, sizeof(uv));
 }
 
-/* Solid-color quad via a null texture slot */
-static void UI_WriteColorRect(FLOAT x, FLOAT y, FLOAT w, FLOAT h, COLOR32 color) {
+static void UI_WriteStatusBar(FLOAT x, FLOAT y, FLOAT w, FLOAT h,
+                              FLOAT value, FLOAT maxvalue, COLOR32 color) {
     uiFrame_t frame;
 
     memset(&frame, 0, sizeof(frame));
-    frame.flags.type = FT_TEXTURE;
+    frame.flags.type = FT_SIMPLESTATUSBAR;
     frame.color = color;
-    frame.tex.index = 0;
-    frame.tex.coord[1] = 0xff;
-    frame.tex.coord[3] = 0xff;
+    frame.tex.index = gi.ImageIndex(WOW_STATUS_BAR);
+    frame.value = maxvalue > 0.0f ? MAX(0.0f, MIN(1.0f, value / maxvalue)) : 0.0f;
     UI_SetFrameRect(&frame, x, y, w, h);
     UI_WriteProxyFrame(&frame, NULL, 0);
 }
 
-/* Solid health/mana bar drawn as two color rects (dark background + colored fill) */
+/* Solid panels use the archived status texture because texture slot zero is reserved for unresolved assets. */
+static void UI_WriteColorRect(FLOAT x, FLOAT y, FLOAT w, FLOAT h, COLOR32 color) {
+    UI_WriteStatusBar(x, y, w, h, 1.0f, 1.0f, color);
+}
+
+/* Health/resource bars use a dark inset and the same archived texture for the live fill. */
 static void UI_WriteColorBar(FLOAT x, FLOAT y, FLOAT w, FLOAT h,
                              FLOAT value, FLOAT maxvalue,
                              COLOR32 fill_color) {
-    FLOAT p = maxvalue > 0.0f ? value / maxvalue : 0.0f;
-    if (p < 0.0f) p = 0.0f;
-    if (p > 1.0f) p = 1.0f;
     UI_WriteColorRect(x, y, w, h, MAKE(COLOR32, 12, 10, 8, 220));
-    if (p > 0.0f)
-        UI_WriteColorRect(x + PW(2), y + PH(2), (w - PW(4)) * p, h - PH(4), fill_color);
+    UI_WriteStatusBar(x + PW(2), y + PH(2), w - PW(4), h - PH(4), value, maxvalue, fill_color);
 }
 
 /* Minimap: clean square viewport with a server-authored zone header. */
@@ -213,7 +214,7 @@ static void UI_WriteActionButtonSlot(FLOAT x, FLOAT y, DWORD image_index, DWORD 
 /* Targeting frame: the WoW character frame backdrop + health/mana bars + name/level text */
 static void UI_WriteTargetingFrame(LPEDICT ent) {
     LPPLAYER ps = &ent->client->ps;
-    char name_buf[64], level_buf[32];
+    char name_buf[64], level_buf[32], health_buf[32], power_buf[32], xp_buf[32];
 
     /* Character frame backdrop — drawn with a slight tint matching the original */
     UI_WriteImageUV("Interface\\TargetingFrame\\UI-TargetingFrame.blp",
@@ -236,14 +237,28 @@ static void UI_WriteTargetingFrame(LPEDICT ent) {
                       level_buf, MAKE(COLOR32, 235, 225, 190, 255), FONT_JUSTIFYCENTER);
 
     /* Health bar */
-    UI_WriteColorBar(PX(105), PY(41), PW(119), PH(12),
+    UI_WriteColorBar(PX(105), PY(38), PW(119), PH(13),
                      (FLOAT)ps->stats[WOW_STAT_HEALTH], (FLOAT)ps->stats[WOW_STAT_HEALTH_MAX],
                      MAKE(COLOR32, 20, 178, 48, 235));
+    snprintf(health_buf, sizeof(health_buf), "%u / %u",
+             (unsigned)ps->stats[WOW_STAT_HEALTH], (unsigned)ps->stats[WOW_STAT_HEALTH_MAX]);
+    UI_WriteTextFrame(PX(105), PY(39), PW(119), PH(11), health_buf, COLOR32_WHITE, FONT_JUSTIFYCENTER);
 
-    /* Mana/power bar */
-    UI_WriteColorBar(PX(105), PY(54), PW(119), PH(11),
+    /* Warrior resource bar: combat generates rage in the server-owned power pool. */
+    UI_WriteColorBar(PX(105), PY(52), PW(119), PH(12),
                      (FLOAT)ps->stats[WOW_STAT_POWER], (FLOAT)ps->stats[WOW_STAT_POWER_MAX],
-                     MAKE(COLOR32, 26, 82, 210, 235));
+                     MAKE(COLOR32, 180, 35, 28, 235));
+    snprintf(power_buf, sizeof(power_buf), "Rage %u / %u",
+             (unsigned)ps->stats[WOW_STAT_POWER], (unsigned)ps->stats[WOW_STAT_POWER_MAX]);
+    UI_WriteTextFrame(PX(105), PY(53), PW(119), PH(10), power_buf, COLOR32_WHITE, FONT_JUSTIFYCENTER);
+
+    /* XP remains visible in the same profile template and refills on level-up. */
+    UI_WriteColorBar(PX(105), PY(65), PW(119), PH(10),
+                     (FLOAT)ps->stats[WOW_STAT_XP], (FLOAT)ps->stats[WOW_STAT_XP_MAX],
+                     MAKE(COLOR32, 150, 80, 210, 235));
+    snprintf(xp_buf, sizeof(xp_buf), "XP %u / %u",
+             (unsigned)ps->stats[WOW_STAT_XP], (unsigned)ps->stats[WOW_STAT_XP_MAX]);
+    UI_WriteTextFrame(PX(105), PY(65), PW(119), PH(10), xp_buf, COLOR32_WHITE, FONT_JUSTIFYCENTER);
 }
 
 static void UI_WriteStart(DWORD layer) {

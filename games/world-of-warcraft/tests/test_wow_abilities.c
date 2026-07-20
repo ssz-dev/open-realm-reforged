@@ -140,7 +140,12 @@ static void test_mem_free(HANDLE mem) {
 }
 
 static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
-    (void)filename;
+    static BYTE artificial_firebolt;
+
+    if (filename && !strcasecmp(filename, "Spells\\Fireball_Missile_High.m2")) {
+        if (size) *size = 1;
+        return &artificial_firebolt;
+    }
     if (size) *size = 0;
     return NULL;
 }
@@ -148,6 +153,9 @@ static HANDLE test_read_file(LPCSTR filename, LPDWORD size) {
 void UI_WriteWowHud(LPEDICT ent) {
     (void)ent;
 }
+
+void UI_WriteWowQuestLog(LPEDICT ent) { (void)ent; }
+void UI_HideWowQuestLog(LPEDICT ent) { (void)ent; }
 
 static struct game_import test_import(void) {
     struct game_import import;
@@ -180,6 +188,7 @@ static void reset_state(void) {
     test_multicast_size = 0;
     memset(test_multicast_buf, 0, sizeof(test_multicast_buf));
     memset(test_last_error, 0, sizeof(test_last_error));
+    gi = test_import();
 
     globals.edicts = wow_edicts;
     globals.max_edicts = WOW_MAX_EDICTS;
@@ -202,6 +211,9 @@ static LPEDICT make_player(void) {
         ent->inuse = true;
         local->kind = WOW_ENTITY_PLAYER;
         local->health = 50;
+        local->max_health = 100;
+        local->max_power = BZ_WOW_PLAYER_MAX_POWER;
+        local->level = 1;
         local->hostile = false;
         local->attack_damage_point = 250;
         local->attack_backswing = 450;
@@ -229,6 +241,9 @@ static LPEDICT make_creature(FLOAT x, FLOAT y) {
 
         local->kind = WOW_ENTITY_CREATURE;
         local->health = 3;
+        local->max_health = 3;
+        local->level = 1;
+        local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
         local->hostile = true;
         ent->idle = Wow_AIIdle;
         ent->attack = Wow_AIAttack;

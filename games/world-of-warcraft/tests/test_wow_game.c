@@ -556,6 +556,12 @@ static void test_wow_load_map_initializes_player_state(void) {
     ASSERT_NOT_NULL(local);
     ASSERT_EQ_INT((int)local->kind, WOW_ENTITY_PLAYER);
     ASSERT_EQ_INT((int)local->health, 100);
+    ASSERT_EQ_INT((int)local->max_health, 100);
+    ASSERT_EQ_INT((int)local->power, 0);
+    ASSERT_EQ_INT((int)local->max_power, BZ_WOW_PLAYER_MAX_POWER);
+    ASSERT_EQ_INT((int)local->level, 1);
+    ASSERT_EQ_INT((int)local->xp, 0);
+    ASSERT_EQ_INT((int)player->s.stats[ENT_HEALTH], 255);
     assert_player_spawned_at_safe_loc(player);
     ASSERT_EQ_FLOAT(player->client->ps.origin.x, player->s.origin.x, 0.001f);
     ASSERT_EQ_FLOAT(player->client->ps.origin.y, player->s.origin.y, 0.001f);
@@ -563,7 +569,11 @@ static void test_wow_load_map_initializes_player_state(void) {
     ASSERT_STR_EQ(player->client->ps.name, "Thrall");
     ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_HEALTH], 100);
     ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_HEALTH_MAX], 100);
-    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_POWER], 42);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_POWER], 0);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_POWER_MAX], BZ_WOW_PLAYER_MAX_POWER);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_LEVEL], 1);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_XP], 0);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_XP_MAX], 400);
     ASSERT_EQ_INT((int)test_num_images, 0);
     ASSERT_EQ_INT((int)test_unicast_calls, 0);
     ASSERT_NOT_NULL(game->ClientBegin);
@@ -608,6 +618,10 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     ASSERT_EQ_INT((int)creature_local->kind, WOW_ENTITY_CREATURE);
     ASSERT_EQ_INT((int)creature_local->display_id, 161);
     ASSERT_EQ_INT((int)creature_local->health, 3);
+    ASSERT_EQ_INT((int)creature_local->max_health, BZ_WOW_CREATURE_BASE_HEALTH);
+    ASSERT_EQ_INT((int)creature_local->level, 1);
+    ASSERT_EQ_INT((int)creature_local->xp_reward, BZ_WOW_CREATURE_KILL_XP);
+    ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 255);
     ASSERT((creature->svflags & SVF_MONSTER) != 0);
     ASSERT((creature->s.flags & EF_GROUND_ANCHOR) != 0);
     ASSERT_EQ_INT((int)creature->s.player, 2);
@@ -767,11 +781,47 @@ static void test_wow_zone_name_tracks_player_area(void) {
     if (game->Shutdown) game->Shutdown();
 }
 
+/* Vitals are copied from the server entity and rebuild the profile only when a displayed value changes. */
+static void test_wow_player_progression_refreshes_live_hud_once(void) {
+    struct game_export *game = init_game();
+    LPEDICT player;
+    wowEntityLocal_t *local;
+    DWORD initial_hud_writes;
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    local = Wow_EntityLocal(player);
+    game->ClientBegin(player);
+    initial_hud_writes = test_hud_write_calls;
+    local->health = 75;
+    local->power = 20;
+    local->xp = 100;
+    game->RunFrame();
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_HEALTH], 75);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_POWER], 20);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_XP], 100);
+    ASSERT_EQ_INT((int)test_hud_write_calls, (int)initial_hud_writes + 1);
+    game->RunFrame();
+    ASSERT_EQ_INT((int)test_hud_write_calls, (int)initial_hud_writes + 1);
+
+    local->level = 2;
+    local->health = local->max_health = 110;
+    local->xp = 50;
+    game->RunFrame();
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_LEVEL], 2);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_HEALTH_MAX], 110);
+    ASSERT_EQ_INT((int)player->client->ps.stats[WOW_STAT_XP_MAX], 900);
+    ASSERT_EQ_INT((int)test_hud_write_calls, (int)initial_hud_writes + 2);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
 int main(void) {
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
     RUN_TEST(test_wow_gm_mode_accelerates_and_guards_teleport);
     RUN_TEST(test_wow_quest_log_commands_toggle_server_ui);
     RUN_TEST(test_wow_zone_name_tracks_player_area);
+    RUN_TEST(test_wow_player_progression_refreshes_live_hud_once);
     TEST_RESULTS();
 }

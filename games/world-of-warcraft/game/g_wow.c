@@ -531,16 +531,7 @@ void Wow_RunProjectile(LPEDICT ent) {
         FLOAT step = local->projectile_speed * ((FLOAT)FRAMETIME / 1000.0f);
 
         if (dist <= step) {
-            /* Hit the target — apply damage. */
-            wowEntityLocal_t *target_local = Wow_EntityLocal(target);
-            if (target_local && !target_local->dead) {
-                if (target_local->health <= local->projectile_damage) {
-                    Wow_AIDie(target, ent);
-                } else {
-                    target_local->health -= local->projectile_damage;
-                    if (target->pain) target->pain(target);
-                }
-            }
+            Wow_DealDamage(target, ent, local->projectile_damage);
             ent->inuse = false;
             return;
         }
@@ -619,7 +610,8 @@ void Wow_HealingTouch(LPEDICT caster) {
     local = Wow_EntityLocal(caster);
     if (!local || local->dead) return;
 
-    local->health = MIN(local->health + WOW_HEALING_TOUCH_HEAL, 100);
+    local->health = MIN(local->health + WOW_HEALING_TOUCH_HEAL, local->max_health);
+    Wow_SyncEntityVitals(caster);
     /* Play a cast animation if available. */
     static LPCSTR const heal_anims[] = { "SpellCastOmni", "Cast", "Attack1H", NULL };
     Wow_SetEntityMoveFirstAnimation(caster, &wow_move_cast, heal_anims);
@@ -666,20 +658,24 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
     LPCMAPINFO mapinfo;
     LPCSTR zone;
     LPPLAYER ps;
+    BOOL hud_changed;
+    USHORT stats[8];
 
     if (!ent || !ent->client || !local) {
         return;
     }
     ps = &ent->client->ps;
     wc = (wowClient_t *)ent->client;
-    ps->stats[WOW_STAT_HEALTH] = (USHORT)local->health;
-    ps->stats[WOW_STAT_HEALTH_MAX] = 100;
-    ps->stats[WOW_STAT_POWER] = 42;
-    ps->stats[WOW_STAT_POWER_MAX] = 100;
-    ps->stats[WOW_STAT_LEVEL] = 1;
-    ps->stats[WOW_STAT_XP] = 120;
-    ps->stats[WOW_STAT_XP_MAX] = 400;
-    ps->stats[WOW_STAT_COPPER] = 1234;
+    stats[WOW_STAT_HEALTH] = (USHORT)local->health;
+    stats[WOW_STAT_HEALTH_MAX] = (USHORT)local->max_health;
+    stats[WOW_STAT_POWER] = (USHORT)local->power;
+    stats[WOW_STAT_POWER_MAX] = (USHORT)local->max_power;
+    stats[WOW_STAT_LEVEL] = (USHORT)local->level;
+    stats[WOW_STAT_XP] = (USHORT)local->xp;
+    stats[WOW_STAT_XP_MAX] = (USHORT)Wow_XpForNextLevel(local->level);
+    stats[WOW_STAT_COPPER] = 1234;
+    hud_changed = memcmp(ps->stats, stats, sizeof(stats)) != 0;
+    memcpy(ps->stats, stats, sizeof(stats));
     zone = CM_WowAreaNameAtPoint(ent->s.origin.x, ent->s.origin.y);
     mapinfo = CM_GetMapInfo();
     if (!zone || !*zone)
@@ -687,9 +683,10 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
             ? mapinfo->loadingScreenTitle : "Azeroth";
     if (strcmp(wc->zone_name, zone)) {
         snprintf(wc->zone_name, sizeof(wc->zone_name), "%s", zone);
-        /* Zone labels are server-authored, so refresh the HUD only on an actual area transition. */
-        if (ps->client_ui_state == CLIENT_UI_GAME) UI_WriteWowHud(ent);
+        hud_changed = true;
     }
+    /* Server-owned vitals and zone labels only rebuild the HUD when their displayed values change. */
+    if (hud_changed && ps->client_ui_state == CLIENT_UI_GAME) UI_WriteWowHud(ent);
 }
 
 static void Wow_WriteHudIcon(wowHudIcon_t const *icon, DWORD slot) {
@@ -912,7 +909,9 @@ static void Wow_InitPlayer(LPEDICT ent) {
         local->hostile = false;
         local->home = wow_spawn_origin;
         local->yaw = wow_move.yaw;
-        local->health = 100;
+        local->health = local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
+        local->max_power = BZ_WOW_PLAYER_MAX_POWER;
+        local->level = 1;
         local->attack_damage_point = 250;
         local->attack_backswing = 450;
     }
@@ -938,6 +937,7 @@ static void Wow_InitPlayer(LPEDICT ent) {
     ent->run = NULL;
     ent->attack = Wow_AIAttack;
     ent->pain = Wow_AIPain;
+    Wow_SyncEntityVitals(ent);
     Wow_SetStandMove(ent);
 
     ps = &ent->client->ps;

@@ -104,13 +104,21 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     capturedFrame_t const *border;
     capturedFrame_t const *quest;
     BOOL found_zone = false;
+    BOOL found_level = false, found_health = false, found_power = false, found_xp = false;
+    BOOL found_health_text = false, found_power_text = false, found_xp_text = false;
 
     reset_state();
     memset(&wc, 0, sizeof(wc));
     memset(&ent, 0, sizeof(ent));
     ent.client = &wc.client;
     wc.client.ps.name = "Tester";
-    wc.client.ps.stats[WOW_STAT_LEVEL] = 1;
+    wc.client.ps.stats[WOW_STAT_HEALTH] = 80;
+    wc.client.ps.stats[WOW_STAT_HEALTH_MAX] = 100;
+    wc.client.ps.stats[WOW_STAT_POWER] = 25;
+    wc.client.ps.stats[WOW_STAT_POWER_MAX] = 100;
+    wc.client.ps.stats[WOW_STAT_LEVEL] = 2;
+    wc.client.ps.stats[WOW_STAT_XP] = 100;
+    wc.client.ps.stats[WOW_STAT_XP_MAX] = 900;
     snprintf(wc.zone_name, sizeof(wc.zone_name), "%s", "The Sepulcher");
     UI_WriteWowHud(&ent);
 
@@ -128,9 +136,30 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     ASSERT_EQ_FLOAT(minimap->frame.size.height, 128.0f / 768.0f, 0.0001f);
     ASSERT(frame_y(quest) > frame_y(minimap) + minimap->frame.size.height);
     ASSERT_STR_EQ(quest->tooltip, "Open Quest Log");
-    FOR_LOOP(i, num_captured)
+    FOR_LOOP(i, num_captured) {
         if (!strcmp(captured[i].text, "The Sepulcher")) found_zone = true;
+        if (!strcmp(captured[i].text, "Lvl 2")) found_level = true;
+        if (!strcmp(captured[i].text, "80 / 100")) found_health_text = true;
+        if (!strcmp(captured[i].text, "Rage 25 / 100")) found_power_text = true;
+        if (!strcmp(captured[i].text, "XP 100 / 900")) found_xp_text = true;
+        if (captured[i].frame.flags.type != FT_SIMPLESTATUSBAR ||
+            strcmp(captured[i].image, "Interface\\TargetingFrame\\UI-StatusBar.blp")) continue;
+        if (captured[i].frame.color.g == 178) {
+            found_health = true;
+            ASSERT_EQ_FLOAT(captured[i].frame.value, 0.8f, 0.0001f);
+        } else if (captured[i].frame.color.r == 180) {
+            found_power = true;
+            ASSERT_EQ_FLOAT(captured[i].frame.value, 0.25f, 0.0001f);
+        } else if (captured[i].frame.color.b == 210) {
+            found_xp = true;
+            ASSERT_EQ_FLOAT(captured[i].frame.value, 100.0f / 900.0f, 0.0001f);
+        }
+    }
     ASSERT(found_zone);
+    ASSERT(found_level);
+    ASSERT(found_health && found_health_text);
+    ASSERT(found_power && found_power_text);
+    ASSERT(found_xp && found_xp_text);
 }
 
 static void test_wow_quest_log_writes_classic_empty_state_and_close_action(void) {

@@ -21,6 +21,12 @@
 #define WOW_MOVE_RIGHT 8
 #define WOW_WALK_SPEED 7.0f
 #define BZ_WOW_GM_SPEED 70.0f
+#define BZ_WOW_MAX_LEVEL 60
+#define BZ_WOW_PLAYER_BASE_HEALTH 100
+#define BZ_WOW_PLAYER_HEALTH_PER_LEVEL 10
+#define BZ_WOW_PLAYER_MAX_POWER 100
+#define BZ_WOW_CREATURE_BASE_HEALTH 3
+#define BZ_WOW_CREATURE_KILL_XP 100
 #define WOW_MELEE_RANGE 5.0f
 #define WOW_CAMERA_MIN_PITCH 300.0f
 #define WOW_CAMERA_MAX_PITCH 350.0f
@@ -51,6 +57,12 @@ typedef struct {
     FLOAT patrol_phase;
     FLOAT walk_speed;
     DWORD health;
+    DWORD max_health;
+    DWORD power;
+    DWORD max_power;
+    DWORD level;
+    DWORD xp;
+    DWORD xp_reward;
     DWORD attack_damage_point;
     DWORD attack_backswing;
     DWORD attack_time;
@@ -130,6 +142,10 @@ void Wow_AIPain(LPEDICT ent);
 void Wow_AIDie(LPEDICT ent, LPEDICT attacker);
 BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent);
 BOOL Wow_EntityAffectingCombat(LPEDICT ent);
+void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage);
+void Wow_SyncEntityVitals(LPEDICT ent);
+DWORD Wow_XpForNextLevel(DWORD level);
+void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim);
 BOOL Wow_SetStandMove(LPEDICT ent);
 BOOL Wow_SetRunMove(LPEDICT ent);
 BOOL Wow_SetWalkMove(LPEDICT ent);
