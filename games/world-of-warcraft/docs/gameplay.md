@@ -95,3 +95,37 @@ and `loot`/`use_item` commands; it never owns item stats.
 
 Inventory tests use only fixed artificial entities and item IDs in `tests/test_wow_abilities.c`,
 `tests/test_wow_combat.c`, `tests/test_wow_game.c`, and `tests/test_wow_hud.c`.
+
+## First Kill Quest
+
+`g_quest.c` keeps immutable `WOWQUESTDEF` data separate from the player's `WOWQUESTPROGRESS`. The first definition is
+`first_hunt`: defeat four hostile creatures, then receive 250 XP and one Minor Healing Potion. Progress follows one
+exclusive state machine:
+
+```text
+Available -> Active -> ReadyToTurnIn -> Completed
+```
+
+The controlled fifth ambient creature is a neutral, selectable quest giver. Selecting it within
+`BZ_WOW_QUEST_INTERACTION_RANGE` derives an `Accept Quest` or `Turn In` HUD command from the current state. Both the
+HUD and the optional `quest_accept first_hunt`, `quest_turn_in first_hunt`, and `quest_status` development commands
+call the same server functions.
+
+Kill progress extends the existing confirmed-death chain:
+
+```text
+Wow_DealDamage
+  -> Wow_AIDie
+  -> Wow_CombatOwner
+  -> existing XP and loot
+  -> Wow_QuestCreatureKilled
+  -> derived quest HUD
+```
+
+The guarded `Wow_AIDie` transition guarantees one count per living spawn. Projectile ownership resolves to its
+caster, while neutral creatures, creature-owned deaths, evade, and duplicate death calls do not advance the quest.
+At four kills the counter clamps and becomes ready for turn-in.
+
+Turn-in first inserts the complete item reward through the existing copied-bag `Wow_GiveItem` path. Only a successful
+insert commits completion and calls the central `Wow_AwardXp`; therefore a full bag leaves the quest ready, grants no
+XP, and cannot create a partial or duplicate reward. Quest tests use synthetic entities and fixed item/quest IDs only.

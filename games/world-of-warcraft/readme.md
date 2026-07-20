@@ -21,9 +21,11 @@ The `openwow` build is useful for testing terrain/model asset loading and render
   projectile kill credit.
 - Corpse loot, a six-slot stack-aware inventory, healing potions, and single-slot weapon/armor equipment with
   server-authoritative stat effects.
+- A complete server-authoritative kill quest with a neutral world quest giver, confirmed-kill progress, atomic
+  XP/item turn-in, tracker, and quest-log state.
 - Loading-screen UI with WoW textures, fonts, loading title/status text, and progress display.
 - DBC helpers for selected loading-screen and map metadata lookup.
-- Server-authored in-game HUD with a live player profile, ADT minimap, GM controls, and an interactive empty quest log.
+- Server-authored in-game HUD with a live player profile, ADT minimap, GM controls, quest tracker, and quest log.
 - Build integration through `make openwow`.
 
 ## Partial
@@ -35,7 +37,7 @@ The `openwow` build is useful for testing terrain/model asset loading and render
 
 ## Not There Yet
 
-- Full MMO quest gameplay, quest persistence, networking, or server world rules.
+- Multiple quest chains, quest persistence, networking, or production server world rules.
 - Full DBC/DB2 coverage.
 - Full UI implementation beyond the loading-screen style shell.
 - Complete WMO, doodad, creature, particle, and animation fidelity.
@@ -79,7 +81,8 @@ What the World of Warcraft target currently knows how to load and render.
 - [References](docs/references.md): public schema references and local source/tool entry points.
 - [Sounds](docs/sounds.md)
 - [In-Game UI](docs/ui.md): server-authored HUD layers, minimap placement, GM controls, and quest-log commands.
-- [Gameplay Runtime](docs/gameplay.md): authoritative combat, abilities, loot, inventory, equipment, death, and respawn.
+- [Gameplay Runtime](docs/gameplay.md): authoritative combat, abilities, loot, inventory, equipment, quests, death,
+  and respawn.
 
 ### Short Version
 

@@ -8,6 +8,8 @@ both use the normalized 1024x768 WoW canvas.
 - Zone header: `(879, 8, 128, 22)`.
 - Minimap viewport: `(879, 30, 128, 128)`.
 - Quest-log button: `(879, 170, 40, 40)`, directly below the minimap.
+- Quest tracker: `(24, 112, 280, 70)`, below the player profile and left of the minimap.
+- Quest interaction card: `(24, 112, 280, 66)` when available, or below the active tracker at y=190.
 - GM toggle and panel end before x=866, leaving a gap before the minimap at x=879.
 - Quest log: classic 384x512 frame at `(0, 104)`.
 
@@ -43,6 +45,11 @@ questlog close
 questlog toggle
 ```
 
-The dialog is sent on `LAYER_QUESTDIALOG`, and closing it replaces that layer with an empty layout. Until quest
-gameplay supplies server-side quest records, the implemented frame deliberately renders the classic empty state
-instead of synthetic quest progress.
+The dialog is sent on `LAYER_QUESTDIALOG`, and closing it replaces that layer with an empty layout. Its title,
+description, progress, status, and action are derived from `WOWQUESTPROGRESS` and immutable quest definitions in the
+game module. The HUD snapshot contains display strings and commands only; it cannot mutate progress or grant rewards.
+When no quest record exists, the same frame renders the classic empty state.
+
+Selecting the nearby neutral quest giver exposes `quest_accept first_hunt` while the quest is available and
+`quest_turn_in first_hunt` once it is ready. An active quest remains visible in the fixed tracker without overlapping
+the player profile, minimap, inventory, loot prompt, or action bar.

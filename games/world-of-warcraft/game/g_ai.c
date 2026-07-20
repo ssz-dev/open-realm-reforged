@@ -14,8 +14,8 @@ static wowMove_t wow_move_death = { "Death", NULL, NULL };
 #define WOW_DEFAULT_PAIN_TIME 450
 #define WOW_DEFAULT_DEATH_TIME 1200
 
-/* Projectile damage belongs to its caster for retaliation, power gain, and XP credit. */
-static LPEDICT Wow_CombatOwner(LPEDICT attacker) {
+/* Projectile damage belongs to its caster for retaliation, power gain, XP, and quest credit. */
+LPEDICT Wow_CombatOwner(LPEDICT attacker) {
     wowEntityLocal_t *local = Wow_EntityLocal(attacker);
     DWORD number;
 
@@ -36,12 +36,19 @@ void Wow_SyncEntityVitals(LPEDICT ent) {
         ? (BYTE)MAX(1, MIN(255, (local->power * 255 + local->max_power - 1) / local->max_power)) : 0;
 }
 
-/* Combat targets are server-owned living actors; dead creatures stop being monsters until respawn. */
-BOOL Wow_EntityCanBeTargeted(LPCEDICT ent) {
+/* Selection includes neutral actors, while combat targeting admits only players and hostile living creatures. */
+BOOL Wow_EntityCanBeSelected(LPCEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
 
     return ent && ent->inuse && local && (local->kind == WOW_ENTITY_PLAYER || local->kind == WOW_ENTITY_CREATURE) &&
         !local->dead && local->health > 0;
+}
+
+BOOL Wow_EntityCanBeTargeted(LPCEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+    return Wow_EntityCanBeSelected(ent) &&
+        (local->kind == WOW_ENTITY_PLAYER || (local->kind == WOW_ENTITY_CREATURE && local->hostile));
 }
 
 /* TODO: Replace this compact scaffold curve with authoritative server progression data. */
@@ -50,33 +57,39 @@ DWORD Wow_XpForNextLevel(DWORD level) {
     return 400 + (level - 1) * 500;
 }
 
-/* A kill is awarded once by Wow_AIDie; level-ups preserve overflow XP and refill the new pools. */
-void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim) {
-    wowEntityLocal_t *source_local, *victim_local;
-    LPEDICT source = Wow_CombatOwner(attacker);
+/* Every XP source uses one overflow-preserving level transition and one authoritative player state. */
+void Wow_AwardXp(LPEDICT player, DWORD amount) {
+    wowEntityLocal_t *local = Wow_EntityLocal(player);
     DWORD needed, old_level;
 
-    if (!source || !victim || source == victim) return;
-    source_local = Wow_EntityLocal(source);
-    victim_local = Wow_EntityLocal(victim);
-    if (!source_local || !victim_local || source_local->kind != WOW_ENTITY_PLAYER ||
-        victim_local->kind != WOW_ENTITY_CREATURE || !victim_local->xp_reward) return;
-    old_level = source_local->level;
-    source_local->xp += victim_local->xp_reward;
-    while ((needed = Wow_XpForNextLevel(source_local->level)) && source_local->xp >= needed) {
-        source_local->xp -= needed;
-        source_local->level++;
-        source_local->max_health = BZ_WOW_PLAYER_BASE_HEALTH +
-            (source_local->level - 1) * BZ_WOW_PLAYER_HEALTH_PER_LEVEL;
-        source_local->health = source_local->max_health;
-        source_local->power = source_local->max_power;
-        fprintf(stderr, "OpenWoW level: reached level %u\n", (unsigned)source_local->level);
+    if (!player || !local || local->kind != WOW_ENTITY_PLAYER || !amount) return;
+    old_level = local->level;
+    local->xp += amount;
+    while ((needed = Wow_XpForNextLevel(local->level)) && local->xp >= needed) {
+        local->xp -= needed;
+        local->level++;
+        local->max_health = BZ_WOW_PLAYER_BASE_HEALTH +
+            (local->level - 1) * BZ_WOW_PLAYER_HEALTH_PER_LEVEL;
+        local->health = local->max_health;
+        local->power = local->max_power;
+        fprintf(stderr, "OpenWoW level: reached level %u\n", (unsigned)local->level);
     }
-    if (source_local->level >= BZ_WOW_MAX_LEVEL) source_local->xp = 0;
-    Wow_SyncEntityVitals(source);
-    Wow_SetCombatMessage(source,
-        source_local->level != old_level ? WOW_COMBAT_MESSAGE_LEVEL : WOW_COMBAT_MESSAGE_XP,
-        source_local->level != old_level ? source_local->level : victim_local->xp_reward);
+    if (local->level >= BZ_WOW_MAX_LEVEL) local->xp = 0;
+    Wow_SyncEntityVitals(player);
+    Wow_SetCombatMessage(player, local->level != old_level ? WOW_COMBAT_MESSAGE_LEVEL : WOW_COMBAT_MESSAGE_XP,
+                         local->level != old_level ? local->level : amount);
+}
+
+/* A kill is awarded once by Wow_AIDie after combat ownership resolves through the projectile caster. */
+void Wow_AwardKillXp(LPEDICT attacker, LPEDICT victim) {
+    LPEDICT source = Wow_CombatOwner(attacker);
+    wowEntityLocal_t *source_local = Wow_EntityLocal(source);
+    wowEntityLocal_t *victim_local = Wow_EntityLocal(victim);
+
+    if (!source || !victim || source == victim || !source_local || !victim_local ||
+        source_local->kind != WOW_ENTITY_PLAYER || victim_local->kind != WOW_ENTITY_CREATURE ||
+        !victim_local->xp_reward) return;
+    Wow_AwardXp(source, victim_local->xp_reward);
 }
 
 static void Wow_GainCombatPower(LPEDICT ent, DWORD amount) {
@@ -207,7 +220,8 @@ void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage) {
     }
 
     target_local = Wow_EntityLocal(target);
-    if (!target_local || target_local->dead || target_local->health == 0) {
+    if (!target_local || target_local->dead || target_local->health == 0 ||
+        (target_local->kind == WOW_ENTITY_CREATURE && !target_local->hostile)) {
         return;
     }
 
@@ -415,7 +429,7 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker) {
         NULL,
     };
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
-    (void)attacker;
+    LPEDICT source = Wow_CombatOwner(attacker);
 
     if (!ent || !local || local->dead) {
         return;
@@ -433,8 +447,9 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker) {
     if (local->kind == WOW_ENTITY_CREATURE) ent->svflags &= ~SVF_MONSTER;
     Wow_ClearCombatReferences(ent);
     Wow_SyncEntityVitals(ent);
-    Wow_AwardKillXp(attacker, ent);
+    Wow_AwardKillXp(source, ent);
     if (local->kind == WOW_ENTITY_CREATURE) Wow_GenerateLoot(ent);
+    Wow_QuestCreatureKilled(source, ent);
     if (Wow_SetEntityMoveFirstAnimation(ent, &wow_move_death, death_animations) && local->animation) {
         local->death_time = MAX(1, local->animation->interval[1] - local->animation->interval[0]);
     } else {
@@ -562,7 +577,7 @@ static BOOL Wow_AIAcquirePlayer(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
     LPEDICT player = &wow_edicts[0];
 
-    if (!ent || !local || !Wow_EntityCanBeTargeted(player) ||
+    if (!ent || !local || !local->hostile || !Wow_EntityCanBeTargeted(player) ||
         Wow_Distance2(&player->s.origin2, &ent->s.origin2) > BZ_WOW_CREATURE_AGGRO_RANGE) return false;
     local->enemy = player;
     local->ai_state = WOW_AI_AGGRO;

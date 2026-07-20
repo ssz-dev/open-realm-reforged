@@ -7,6 +7,7 @@
 #define WOW_CREATURE_DISPLAY_BOAR 193
 #define WOW_CREATURE_DISPLAY_KOBOLD 163
 #define WOW_CREATURE_DISPLAY_MURLOC 188
+#define BZ_WOW_QUEST_GIVER_AMBIENT_INDEX 4
 
 typedef struct {
     DWORD display_id;
@@ -274,18 +275,21 @@ void Wow_SpawnAmbientCreatures(LPCVECTOR2 origin) {
         FLOAT const angle = (FLOAT)DEG2RAD((i * 137) % 360);
         FLOAT const radius = type->min_radius + (FLOAT)((i / type_count) * 5) + (FLOAT)((i % 3) * 2);
         FLOAT const patrol_radius = type->walk_speed > 0.0f ? 2.5f + (FLOAT)(i % 5) : 0.0f;
+        LPEDICT creature;
 
         creature_origin = (VECTOR2){
             origin->x + cosf(angle) * radius,
             origin->y + sinf(angle) * radius,
         };
-        if (Wow_SpawnCreature(type->display_id,
-                              &creature_origin,
-                              (FLOAT)RAD2DEG(angle) + 180.0f,
-                              patrol_radius,
-                              type->walk_speed)) {
-            spawned++;
-        }
+        creature = Wow_SpawnCreature(type->display_id,
+                                     &creature_origin,
+                                     (FLOAT)RAD2DEG(angle) + 180.0f,
+                                     patrol_radius,
+                                     type->walk_speed);
+        if (!creature) continue;
+        if (i == BZ_WOW_QUEST_GIVER_AMBIENT_INDEX)
+            Wow_SetQuestGiver(creature, WOW_QUEST_FIRST_HUNT);
+        spawned++;
     }
 
     fprintf(stderr,

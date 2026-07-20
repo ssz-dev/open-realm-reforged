@@ -97,6 +97,12 @@ static capturedFrame_t const *find_frame(FRAMETYPE type, LPCSTR image, LPCSTR on
     return NULL;
 }
 
+static capturedFrame_t const *find_text(LPCSTR text) {
+    FOR_LOOP(i, num_captured)
+        if (!strcmp(captured[i].text, text)) return &captured[i];
+    return NULL;
+}
+
 static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) {
     wowClient_t wc;
     EDICT ent;
@@ -108,6 +114,7 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     capturedFrame_t const *throw_action;
     capturedFrame_t const *potion;
     capturedFrame_t const *loot;
+    capturedFrame_t const *quest_progress;
     BOOL found_zone = false;
     BOOL found_level = false, found_health = false, found_power = false, found_xp = false;
     BOOL found_health_text = false, found_power_text = false, found_xp_text = false;
@@ -152,6 +159,10 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     wc.inventory[0].count = 2;
     snprintf(wc.equipment_text, sizeof(wc.equipment_text), "%s",
              "Weapon: Training Sword | Armor: none");
+    snprintf(wc.quest_hud.title, sizeof(wc.quest_hud.title), "%s", "The First Hunt");
+    snprintf(wc.quest_hud.progress, sizeof(wc.quest_hud.progress), "%s", "2 / 4 hostile creatures");
+    snprintf(wc.quest_hud.status, sizeof(wc.quest_hud.status), "%s", "In progress");
+    wc.quest_hud.tracker_visible = true;
     wc.loot_target = 7;
     snprintf(wc.zone_name, sizeof(wc.zone_name), "%s", "The Sepulcher");
     UI_WriteWowHud(&ent);
@@ -169,11 +180,13 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     throw_action = find_frame(FT_TEXTURE, "Interface\\Icons\\Spell_Fire_FireBolt02.blp", "wow_action 2");
     potion = find_frame(FT_TEXTURE, "Interface\\Icons\\INV_Potion_51.blp", "use_item 0");
     loot = find_frame(FT_TEXTURE, "Interface\\Icons\\INV_Misc_Bag_08.blp", "loot 7");
+    quest_progress = find_text("2 / 4 hostile creatures");
     ASSERT_NOT_NULL(strike);
     ASSERT_NOT_NULL(heavy);
     ASSERT_NOT_NULL(throw_action);
     ASSERT_NOT_NULL(potion);
     ASSERT_NOT_NULL(loot);
+    ASSERT_NOT_NULL(quest_progress);
     ASSERT_STR_EQ(strike->tooltip, "Strike");
     ASSERT_STR_EQ(heavy->tooltip, "Heavy Strike");
     ASSERT_STR_EQ(throw_action->tooltip, "Throw");
@@ -186,6 +199,11 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     ASSERT_EQ_FLOAT(minimap->frame.size.height, 128.0f / 768.0f, 0.0001f);
     ASSERT(frame_y(quest) > frame_y(minimap) + minimap->frame.size.height);
     ASSERT_STR_EQ(quest->tooltip, "Open Quest Log");
+    ASSERT_EQ_FLOAT(frame_x(quest_progress), 34.0f / 1024.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(frame_y(quest_progress), 141.0f / 768.0f, 0.0001f);
+    ASSERT(frame_y(quest_progress) >= 112.0f / 768.0f);
+    ASSERT(frame_y(quest_progress) + quest_progress->frame.size.height < 715.0f / 768.0f);
+    ASSERT(frame_x(quest_progress) + quest_progress->frame.size.width < frame_x(minimap));
     FOR_LOOP(i, num_captured) {
         if (!strcmp(captured[i].text, "The Sepulcher")) found_zone = true;
         if (!strcmp(captured[i].text, "Lvl 2")) found_level = true;
@@ -228,6 +246,45 @@ static void test_wow_hud_draws_clean_minimap_zone_header_and_quest_button(void) 
     ASSERT(found_inventory && found_equipment && found_loot && found_count);
 }
 
+static void test_wow_quest_hud_exposes_runtime_action_and_log_state(void) {
+    wowClient_t wc;
+    EDICT ent;
+    capturedFrame_t const *accept;
+    capturedFrame_t const *title;
+
+    reset_state();
+    memset(&wc, 0, sizeof(wc));
+    memset(&ent, 0, sizeof(ent));
+    ent.client = &wc.client;
+    snprintf(wc.quest_hud.title, sizeof(wc.quest_hud.title), "%s", "The First Hunt");
+    snprintf(wc.quest_hud.description, sizeof(wc.quest_hud.description), "%s",
+             "Defeat four hostile creatures and return to the quest giver.");
+    snprintf(wc.quest_hud.progress, sizeof(wc.quest_hud.progress), "%s", "0 / 4 hostile creatures");
+    snprintf(wc.quest_hud.status, sizeof(wc.quest_hud.status), "%s", "Available");
+    snprintf(wc.quest_hud.action_label, sizeof(wc.quest_hud.action_label), "%s", "Accept Quest");
+    snprintf(wc.quest_hud.action_command, sizeof(wc.quest_hud.action_command), "%s",
+             "quest_accept first_hunt");
+    UI_WriteWowHud(&ent);
+
+    accept = find_frame(FT_TEXTURE, "Interface\\Buttons\\UI-DialogBox-Button-Up.blp",
+                        "quest_accept first_hunt");
+    ASSERT_NOT_NULL(accept);
+    ASSERT_STR_EQ(accept->tooltip, "Accept Quest");
+    ASSERT_EQ_FLOAT(frame_x(accept), 34.0f / 1024.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(frame_y(accept), 136.0f / 768.0f, 0.0001f);
+    ASSERT(frame_y(accept) > 104.0f / 768.0f);
+    ASSERT(frame_x(accept) + accept->frame.size.width < 879.0f / 1024.0f);
+
+    reset_state();
+    UI_WriteWowQuestLog(&ent);
+    title = find_text("The First Hunt");
+    ASSERT_NOT_NULL(title);
+    ASSERT_NOT_NULL(find_text("Defeat four hostile creatures and return to the quest giver."));
+    ASSERT_NOT_NULL(find_text("0 / 4 hostile creatures"));
+    ASSERT_NOT_NULL(find_text("Available"));
+    ASSERT_EQ_FLOAT(frame_y(title), 174.0f / 768.0f, 0.0001f);
+}
+
 static void test_wow_quest_log_writes_classic_empty_state_and_close_action(void) {
     wowClient_t wc;
     EDICT ent;
@@ -264,6 +321,7 @@ static void test_wow_quest_log_writes_classic_empty_state_and_close_action(void)
 
 int main(void) {
     RUN_TEST(test_wow_hud_draws_clean_minimap_zone_header_and_quest_button);
+    RUN_TEST(test_wow_quest_hud_exposes_runtime_action_and_log_state);
     RUN_TEST(test_wow_quest_log_writes_classic_empty_state_and_close_action);
     TEST_RESULTS();
 }

@@ -429,6 +429,36 @@ static LPEDICT first_creature(void) {
     return NULL;
 }
 
+static LPEDICT quest_giver(void) {
+    for (DWORD i = WOW_MAX_CLIENTS; i < (DWORD)globals.num_edicts; i++) {
+        wowEntityLocal_t *local = Wow_EntityLocal(&wow_edicts[i]);
+
+        if (wow_edicts[i].inuse && local && local->quest_giver == WOW_QUEST_FIRST_HUNT)
+            return &wow_edicts[i];
+    }
+    return NULL;
+}
+
+static DWORD hostile_creatures(LPEDICT *creatures, DWORD capacity) {
+    DWORD count = 0;
+
+    for (DWORD i = WOW_MAX_CLIENTS; i < (DWORD)globals.num_edicts && count < capacity; i++) {
+        wowEntityLocal_t *local = Wow_EntityLocal(&wow_edicts[i]);
+
+        if (wow_edicts[i].inuse && local && local->kind == WOW_ENTITY_CREATURE && local->hostile)
+            creatures[count++] = &wow_edicts[i];
+    }
+    return count;
+}
+
+static DWORD test_inventory_count(wowClient_t const *client, wowItemId_t item) {
+    DWORD count = 0;
+
+    FOR_LOOP(i, WOW_UI_INVENTORY_SLOTS)
+        if (client->bag[i].item == item) count += client->bag[i].count;
+    return count;
+}
+
 int G_RegisterModel(LPCSTR filename) {
     return gi.ModelIndex(filename);
 }
@@ -568,6 +598,8 @@ static void test_wow_load_map_initializes_player_state(void) {
     ASSERT_EQ_INT((int)local->max_power, BZ_WOW_PLAYER_MAX_POWER);
     ASSERT_EQ_INT((int)local->level, 1);
     ASSERT_EQ_INT((int)local->xp, 0);
+    ASSERT_EQ_INT((int)((wowClient_t *)player->client)->quest.id, WOW_QUEST_FIRST_HUNT);
+    ASSERT_EQ_INT((int)((wowClient_t *)player->client)->quest.state, WOW_QUEST_AVAILABLE);
     ASSERT_EQ_INT((int)player->s.stats[ENT_HEALTH], 255);
     assert_player_spawned_at_safe_loc(player);
     ASSERT_EQ_FLOAT(player->client->ps.origin.x, player->s.origin.x, 0.001f);
@@ -714,6 +746,165 @@ static void test_wow_action_commands_bind_three_server_abilities(void) {
     ASSERT_EQ_INT((int)client->actions[2].cooldown, 2);
     ASSERT(client->actions[1].flags & WOW_ACTION_DISABLED_COOLDOWN);
     ASSERT(client->actions[2].flags & WOW_ACTION_DISABLED_COOLDOWN);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* The controlled neutral world creature is selectable and exposes the same quest functions used by HUD commands. */
+static void test_wow_first_quest_acceptance_requires_its_world_giver(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, giver, wrong_giver;
+    wowEntityLocal_t *giver_local;
+    wowClient_t *client;
+    char giver_number[16];
+    LPCSTR select_argv[] = { "select", giver_number };
+    LPCSTR accept_argv[] = { "quest_accept", "first_hunt" };
+    LPCSTR turn_in_argv[] = { "quest_turn_in", "first_hunt" };
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    giver = quest_giver();
+    wrong_giver = first_creature();
+    ASSERT_NOT_NULL(giver);
+    ASSERT_NOT_NULL(wrong_giver);
+    giver_local = Wow_EntityLocal(giver);
+    client = (wowClient_t *)player->client;
+    ASSERT_NOT_NULL(Wow_QuestDef(WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)Wow_QuestId("first_hunt"), WOW_QUEST_FIRST_HUNT);
+    ASSERT_EQ_INT((int)Wow_QuestId("missing"), WOW_QUEST_NONE);
+    ASSERT_EQ_INT((int)Wow_QuestDef(WOW_QUEST_FIRST_HUNT)->required_count, 4);
+    ASSERT_EQ_INT((int)Wow_QuestDef(WOW_QUEST_FIRST_HUNT)->xp_reward, 250);
+    ASSERT_EQ_INT((int)Wow_QuestDef(WOW_QUEST_FIRST_HUNT)->item_reward.item,
+                  WOW_ITEM_MINOR_HEALING_POTION);
+    ASSERT_EQ_INT((int)giver->s.number, 5);
+    ASSERT_EQ_INT((int)giver_local->quest_giver, WOW_QUEST_FIRST_HUNT);
+    ASSERT(!giver_local->hostile);
+    ASSERT(!(giver->s.renderfx & RF_HOSTILE));
+    ASSERT(Wow_EntityCanBeSelected(giver));
+    ASSERT(!Wow_EntityCanBeTargeted(giver));
+    Wow_DealDamage(giver, player, giver_local->health);
+    ASSERT_EQ_INT((int)giver_local->health, (int)giver_local->max_health);
+    ASSERT(!Wow_AcceptQuest(player, wrong_giver, WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_AVAILABLE);
+    snprintf(giver_number, sizeof(giver_number), "%u", (unsigned)giver->s.number);
+    game->ClientBegin(player);
+    game->ClientCommand(player, 2, select_argv);
+    game->RunFrame();
+    ASSERT_EQ_INT((int)player->client->ps.selected_entity, (int)giver->s.number);
+    ASSERT_STR_EQ(client->quest_hud.action_command, "quest_accept first_hunt");
+
+    game->ClientCommand(player, 2, accept_argv);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_ACTIVE);
+    ASSERT_EQ_INT((int)client->quest.count, 0);
+    ASSERT_EQ_INT((int)Wow_EntityLocal(player)->xp, 0);
+    game->ClientCommand(player, 2, accept_argv);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_ACTIVE);
+    game->ClientCommand(player, 2, turn_in_argv);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_ACTIVE);
+    ASSERT(!Wow_TurnInQuest(player, wrong_giver, WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_ACTIVE);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Only the existing guarded death transition can advance melee/projectile kill progress, once per living spawn. */
+static void test_wow_first_quest_counts_confirmed_kills_once(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, giver, creatures[8], projectile;
+    wowClient_t *client;
+    wowEntityLocal_t *projectile_local;
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    giver = quest_giver();
+    client = (wowClient_t *)player->client;
+    ASSERT(hostile_creatures(creatures, 8) >= 8);
+    ASSERT(Wow_AcceptQuest(player, giver, WOW_QUEST_FIRST_HUNT));
+
+    Wow_AIDie(giver, player);
+    ASSERT_EQ_INT((int)client->quest.count, 0);
+    Wow_AIDie(creatures[0], player);
+    ASSERT_EQ_INT((int)client->quest.count, 1);
+    Wow_AIDie(creatures[0], player);
+    ASSERT_EQ_INT((int)client->quest.count, 1);
+    projectile = Wow_Spawn();
+    ASSERT_NOT_NULL(projectile);
+    projectile->inuse = true;
+    projectile_local = Wow_EntityLocal(projectile);
+    projectile_local->kind = WOW_ENTITY_PROJECTILE;
+    projectile_local->projectile_caster = player->s.number;
+    Wow_AIDie(creatures[1], projectile);
+    ASSERT_EQ_INT((int)client->quest.count, 2);
+    Wow_AIDie(creatures[2], creatures[3]);
+    ASSERT_EQ_INT((int)client->quest.count, 2);
+    Wow_EntityLocal(creatures[4])->ai_state = WOW_AI_EVADE;
+    Wow_AIRunFrame(creatures[4]);
+    ASSERT_EQ_INT((int)client->quest.count, 2);
+    Wow_AIDie(creatures[4], player);
+    Wow_AIDie(creatures[5], player);
+    ASSERT_EQ_INT((int)client->quest.count, 4);
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_READY_TO_TURN_IN);
+    Wow_AIDie(creatures[6], player);
+    ASSERT_EQ_INT((int)client->quest.count, 4);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
+static void test_wow_first_quest_respawn_counts_only_a_new_death(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, giver, creatures[1];
+    wowClient_t *client;
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    giver = quest_giver();
+    client = (wowClient_t *)player->client;
+    ASSERT_EQ_INT((int)hostile_creatures(creatures, 1), 1);
+    ASSERT(Wow_AcceptQuest(player, giver, WOW_QUEST_FIRST_HUNT));
+    Wow_AIDie(creatures[0], player);
+    ASSERT_EQ_INT((int)client->quest.count, 1);
+    Wow_AIDie(creatures[0], player);
+    ASSERT_EQ_INT((int)client->quest.count, 1);
+    FOR_LOOP(i, 70) Wow_AIRunFrame(creatures[0]);
+    ASSERT(!Wow_EntityLocal(creatures[0])->dead);
+    Wow_AIDie(creatures[0], player);
+    ASSERT_EQ_INT((int)client->quest.count, 2);
+
+    if (game->Shutdown) game->Shutdown();
+}
+
+/* Turn-in first inserts the complete item reward, so a full bag cannot partially grant XP or completion. */
+static void test_wow_first_quest_turn_in_is_atomic_and_once(void) {
+    struct game_export *game = init_game();
+    LPEDICT player, giver;
+    wowEntityLocal_t *player_local;
+    wowClient_t *client;
+
+    ASSERT(game->LoadMap("World/Maps/Azeroth/Azeroth.wdt"));
+    player = &wow_edicts[0];
+    giver = quest_giver();
+    player_local = Wow_EntityLocal(player);
+    client = (wowClient_t *)player->client;
+    client->quest.state = WOW_QUEST_READY_TO_TURN_IN;
+    client->quest.count = Wow_QuestDef(WOW_QUEST_FIRST_HUNT)->required_count;
+    player_local->xp = 300;
+    ASSERT(Wow_GiveItem(player, WOW_ITEM_TRAINING_SWORD, WOW_UI_INVENTORY_SLOTS));
+    ASSERT(!Wow_TurnInQuest(player, giver, WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_READY_TO_TURN_IN);
+    ASSERT_EQ_INT((int)player_local->xp, 300);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 0);
+    ASSERT_EQ_INT((int)client->combat_message.type, WOW_COMBAT_MESSAGE_INVENTORY_FULL);
+
+    memset(&client->bag[WOW_UI_INVENTORY_SLOTS - 1], 0, sizeof(client->bag[0]));
+    ASSERT(Wow_TurnInQuest(player, giver, WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)client->quest.state, WOW_QUEST_COMPLETED);
+    ASSERT_EQ_INT((int)player_local->level, 2);
+    ASSERT_EQ_INT((int)player_local->xp, 150);
+    ASSERT_EQ_INT((int)player_local->max_health, 110);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 1);
+    ASSERT(!Wow_TurnInQuest(player, giver, WOW_QUEST_FIRST_HUNT));
+    ASSERT_EQ_INT((int)player_local->xp, 150);
+    ASSERT_EQ_INT((int)test_inventory_count(client, WOW_ITEM_MINOR_HEALING_POTION), 1);
 
     if (game->Shutdown) game->Shutdown();
 }
@@ -927,6 +1118,10 @@ int main(void) {
     RUN_TEST(test_wow_load_map_initializes_player_state);
     RUN_TEST(test_wow_load_map_spawns_and_runs_creature_state);
     RUN_TEST(test_wow_action_commands_bind_three_server_abilities);
+    RUN_TEST(test_wow_first_quest_acceptance_requires_its_world_giver);
+    RUN_TEST(test_wow_first_quest_counts_confirmed_kills_once);
+    RUN_TEST(test_wow_first_quest_respawn_counts_only_a_new_death);
+    RUN_TEST(test_wow_first_quest_turn_in_is_atomic_and_once);
     RUN_TEST(test_wow_loot_inventory_and_equipment_command_loop);
     RUN_TEST(test_wow_gm_mode_accelerates_and_guards_teleport);
     RUN_TEST(test_wow_quest_log_commands_toggle_server_ui);

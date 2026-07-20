@@ -310,6 +310,38 @@ static void UI_WriteLootPrompt(DWORD target) {
                       MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
 }
 
+/* Quest tracking and interaction share one derived snapshot without owning progress or reward decisions. */
+static void UI_WriteQuestTracker(LPCWOWQUESTHUD quest) {
+    FLOAT action_y;
+
+    if (quest->tracker_visible) {
+        UI_WriteColorRect(PX(24), PY(112), PW(280), PH(70), MAKE(COLOR32, 8, 12, 18, 215));
+        UI_WriteTextFrame(PX(34), PY(120), PW(260), PH(16), quest->title,
+                          MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
+        UI_WriteTextFrame(PX(34), PY(141), PW(260), PH(15), quest->progress,
+                          COLOR32_WHITE, FONT_JUSTIFYLEFT);
+        UI_WriteTextFrame(PX(34), PY(160), PW(260), PH(14), quest->status,
+                          MAKE(COLOR32, 225, 210, 175, 255), FONT_JUSTIFYLEFT);
+    }
+    if (!quest->action_command[0]) return;
+    action_y = quest->tracker_visible ? PY(190) : PY(112);
+    {
+        wowHudButton_t button = {
+            .path = "Interface\\Buttons\\UI-DialogBox-Button-Up.blp",
+            .tooltip = quest->action_label,
+            .onclick = quest->action_command,
+            .rect = { PX(34), action_y + PY(24), PW(128), PH(32) },
+        };
+
+        UI_WriteColorRect(PX(24), action_y, PW(280), PH(66), MAKE(COLOR32, 8, 12, 18, 225));
+        UI_WriteTextFrame(PX(34), action_y + PY(6), PW(260), PH(16), quest->title,
+                          MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
+        UI_WriteImageButton(&button);
+        UI_WriteTextFrame(PX(42), action_y + PY(32), PW(112), PH(14), quest->action_label,
+                          COLOR32_WHITE, FONT_JUSTIFYCENTER);
+    }
+}
+
 /* Targeting frame: the WoW character frame backdrop + health/mana bars + name/level text */
 static void UI_WriteTargetingFrame(LPEDICT ent) {
     LPPLAYER ps = &ent->client->ps;
@@ -381,7 +413,10 @@ void UI_WriteWowQuestLog(LPEDICT ent) {
         .rect = { PX(323), PY(112), PW(32), PH(32) },
     };
 
+    wowClient_t *client;
+
     if (!ent || !ent->client) return;
+    client = (wowClient_t *)ent->client;
     UI_WriteStart(LAYER_QUESTDIALOG);
     UI_WriteImage("Interface\\QuestFrame\\UI-QuestLog-BookIcon.blp",
                   PX(4), PY(108), PW(64), PH(64), COLOR32_WHITE);
@@ -395,11 +430,22 @@ void UI_WriteWowQuestLog(LPEDICT ent) {
                   PX(256), PY(360), PW(128), PH(256), COLOR32_WHITE);
     UI_WriteTextFrame(PX(42), PY(119), PW(300), PH(16), "QUEST LOG",
                       MAKE(COLOR32, 255, 225, 170, 255), FONT_JUSTIFYCENTER);
-    UI_WriteTextFrame(PX(70), PY(174), PW(250), PH(20), "No active quests",
-                      MAKE(COLOR32, 255, 225, 170, 255), FONT_JUSTIFYCENTER);
-    UI_WriteTextFrame(PX(45), PY(205), PW(285), PH(48),
-                      "New quests will appear here when quest gameplay is available.",
-                      MAKE(COLOR32, 225, 210, 175, 255), FONT_JUSTIFYCENTER);
+    if (client->quest_hud.title[0]) {
+        UI_WriteTextFrame(PX(45), PY(174), PW(285), PH(20), client->quest_hud.title,
+                          MAKE(COLOR32, 255, 225, 170, 255), FONT_JUSTIFYCENTER);
+        UI_WriteTextFrame(PX(45), PY(204), PW(285), PH(52), client->quest_hud.description,
+                          MAKE(COLOR32, 225, 210, 175, 255), FONT_JUSTIFYLEFT);
+        UI_WriteTextFrame(PX(45), PY(270), PW(285), PH(18), client->quest_hud.progress,
+                          COLOR32_WHITE, FONT_JUSTIFYLEFT);
+        UI_WriteTextFrame(PX(45), PY(294), PW(285), PH(18), client->quest_hud.status,
+                          MAKE(COLOR32, 255, 215, 120, 255), FONT_JUSTIFYLEFT);
+    } else {
+        UI_WriteTextFrame(PX(70), PY(174), PW(250), PH(20), "No active quests",
+                          MAKE(COLOR32, 255, 225, 170, 255), FONT_JUSTIFYCENTER);
+        UI_WriteTextFrame(PX(45), PY(205), PW(285), PH(48),
+                          "New quests will appear here when quest gameplay is available.",
+                          MAKE(COLOR32, 225, 210, 175, 255), FONT_JUSTIFYCENTER);
+    }
     UI_WriteImageButton(&close_button);
     UI_WriteEnd(ent);
 }
@@ -431,6 +477,7 @@ void UI_WriteWowHud(LPEDICT ent) {
 
     /* Character/targeting frame (portrait area top-left) */
     UI_WriteTargetingFrame(ent);
+    UI_WriteQuestTracker(&wc->quest_hud);
 
     /* Main action bar + end-caps */
     UI_WriteActionBar();

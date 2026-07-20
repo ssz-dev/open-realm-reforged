@@ -710,6 +710,25 @@ void Wow_SetCombatMessage(LPEDICT player, wowCombatMessageType_t type, DWORD val
         case WOW_COMBAT_MESSAGE_EQUIP:
             snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Item equipped");
             break;
+        case WOW_COMBAT_MESSAGE_QUEST_ACCEPTED:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Quest accepted");
+            break;
+        case WOW_COMBAT_MESSAGE_QUEST_PROGRESS: {
+            LPCWOWQUESTDEF def = Wow_QuestDef(client->quest.id);
+
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "Quest progress %u / %u",
+                     (unsigned)value, (unsigned)(def ? def->required_count : 0));
+            break;
+        }
+        case WOW_COMBAT_MESSAGE_QUEST_READY:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Quest ready to turn in");
+            break;
+        case WOW_COMBAT_MESSAGE_QUEST_COMPLETED:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Quest completed");
+            break;
+        case WOW_COMBAT_MESSAGE_QUEST_NOT_READY:
+            snprintf(client->combat_message.text, sizeof(client->combat_message.text), "%s", "Quest not ready here");
+            break;
         default:
             client->combat_message.time = 0;
             client->combat_message.text[0] = '\0';
@@ -820,6 +839,7 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
     LPCSTR zone;
     LPPLAYER ps;
     BOOL hud_changed;
+    BOOL quest_changed;
     USHORT stats[8];
 
     if (!ent || !ent->client || !local) {
@@ -839,6 +859,8 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
     memcpy(ps->stats, stats, sizeof(stats));
     if (Wow_UpdateActionHud(ent)) hud_changed = true;
     if (Wow_UpdateInventoryUiState(ent)) hud_changed = true;
+    quest_changed = Wow_UpdateQuestUiState(ent);
+    if (quest_changed) hud_changed = true;
     zone = CM_WowAreaNameAtPoint(ent->s.origin.x, ent->s.origin.y);
     mapinfo = CM_GetMapInfo();
     if (!zone || !*zone)
@@ -853,6 +875,8 @@ static void Wow_UpdatePlayerHud(LPEDICT ent) {
         UI_WriteWowHud(ent);
         wc->ui_flags &= ~BZ_WOW_UI_DIRTY;
     }
+    if (quest_changed && wc->quest_log_open && ps->client_ui_state == CLIENT_UI_GAME)
+        UI_WriteWowQuestLog(ent);
 }
 
 static void Wow_WriteHudIcon(wowHudIcon_t const *icon, DWORD slot) {
@@ -1119,6 +1143,7 @@ static void Wow_InitPlayer(LPEDICT ent) {
     wow_clients[0].equipment_text[0] = '\0';
     wow_clients[0].loot_target = 0;
     wow_clients[0].ui_flags = 0;
+    Wow_InitQuestProgress(ent);
     memcpy(wow_clients[0].actions, wow_start_actions, sizeof(wow_start_actions));
     FOR_LOOP(i, WOW_ABILITY_COUNT) {
         wowHudIcon_t *icon = &wow_clients[0].actions[i];
@@ -1487,11 +1512,12 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
             ? Wow_EdictByNumber((DWORD)strtoul(argv[1], NULL, 10))
             : NULL;
 
-        if (target && target != ent && Wow_EntityCanBeTargeted(target)) {
+        if (target && target != ent && Wow_EntityCanBeSelected(target)) {
             ent->client->ps.selected_entity = target->s.number;
         } else {
             ent->client->ps.selected_entity = 0;
         }
+        ((wowClient_t *)ent->client)->ui_flags |= BZ_WOW_UI_DIRTY;
     } else if (argc >= 1 && (!strcasecmp(argv[0], "attack") || !strcasecmp(argv[0], "wowattack"))) {
         LPEDICT target = argc >= 2
             ? Wow_EdictByNumber((DWORD)strtoul(argv[1], NULL, 10))
@@ -1528,6 +1554,23 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
         (void)Wow_LootCreature(ent, Wow_EdictByNumber((DWORD)strtoul(argv[1], NULL, 10)));
     } else if (argc >= 2 && !strcasecmp(argv[0], "use_item")) {
         (void)Wow_UseInventorySlot(ent, (DWORD)strtoul(argv[1], NULL, 10));
+    } else if (argc >= 2 &&
+               (!strcasecmp(argv[0], "quest_accept") || !strcasecmp(argv[0], "quest_turn_in"))) {
+        wowQuestId_t quest = Wow_QuestId(argv[1]);
+        LPEDICT giver = Wow_EdictByNumber(ent->client->ps.selected_entity);
+
+        if (!quest) {
+            fprintf(stderr, "OpenWoW Quest: unknown quest '%s'\n", argv[1]);
+            return;
+        }
+        if (!strcasecmp(argv[0], "quest_accept")) (void)Wow_AcceptQuest(ent, giver, quest);
+        else (void)Wow_TurnInQuest(ent, giver, quest);
+    } else if (argc >= 1 && !strcasecmp(argv[0], "quest_status")) {
+        wowClient_t *client = (wowClient_t *)ent->client;
+        LPCWOWQUESTDEF def = Wow_QuestDef(client->quest.id);
+
+        fprintf(stderr, "OpenWoW Quest: %s state=%u progress=%u\n",
+                def ? def->key : "none", (unsigned)client->quest.state, (unsigned)client->quest.count);
     }
 }
 

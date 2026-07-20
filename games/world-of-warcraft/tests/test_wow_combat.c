@@ -167,11 +167,13 @@ static void test_prepare_pair(LPEDICT *attacker_out, LPEDICT *target_out) {
     attacker_local->health = 5;
     attacker_local->max_health = 5;
     attacker_local->level = 1;
+    attacker_local->hostile = true;
     attacker_local->enemy = target;
     target_local->kind = WOW_ENTITY_CREATURE;
     target_local->health = 3;
     target_local->max_health = 3;
     target_local->level = 1;
+    target_local->hostile = true;
 
     *attacker_out = attacker;
     *target_out = target;
@@ -193,6 +195,7 @@ static void test_prepare_player_creature(LPEDICT *player_out, LPEDICT *creature_
     player_local->health = player_local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
     player_local->max_power = BZ_WOW_PLAYER_MAX_POWER;
     player_local->level = 1;
+    player_local->hostile = false;
     player_local->enemy = NULL;
     creature->svflags = SVF_MONSTER;
     creature->idle = Wow_AIIdle;
