@@ -36,6 +36,14 @@ void Wow_SyncEntityVitals(LPEDICT ent) {
         ? (BYTE)MAX(1, MIN(255, (local->power * 255 + local->max_power - 1) / local->max_power)) : 0;
 }
 
+/* Combat targets are server-owned living actors; dead creatures stop being monsters until respawn. */
+BOOL Wow_EntityCanBeTargeted(LPCEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+    return ent && ent->inuse && local && (local->kind == WOW_ENTITY_PLAYER || local->kind == WOW_ENTITY_CREATURE) &&
+        !local->dead && local->health > 0;
+}
+
 /* TODO: Replace this compact scaffold curve with authoritative server progression data. */
 DWORD Wow_XpForNextLevel(DWORD level) {
     if (!level || level >= BZ_WOW_MAX_LEVEL) return 0;
@@ -73,6 +81,43 @@ static void Wow_GainCombatPower(LPEDICT ent, DWORD amount) {
     if (!ent || !local || local->kind != WOW_ENTITY_PLAYER || !local->max_power) return;
     local->power = MIN(local->power + amount, local->max_power);
     Wow_SyncEntityVitals(ent);
+}
+
+static FLOAT Wow_Distance2(LPCVECTOR2 a, LPCVECTOR2 b) {
+    VECTOR2 delta = Vector2_sub(a, b);
+    return Vector2_len(&delta);
+}
+
+static void Wow_ResetAttack(wowEntityLocal_t *local) {
+    if (!local) return;
+    local->attack_time = 0;
+    local->attack_damage_time = 0;
+    local->attack_backswing_time = 0;
+    local->attack_damage_done = false;
+    local->pain_time = 0;
+}
+
+/* Death invalidates every stale target and projectile without reallocating the creature entity. */
+static void Wow_ClearCombatReferences(LPEDICT victim) {
+    DWORD victim_number;
+
+    if (!victim) return;
+    victim_number = victim->s.number;
+    victim->selected = 0;
+    FOR_LOOP(i, WOW_MAX_EDICTS) {
+        LPEDICT ent = &wow_edicts[i];
+        wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+        if (!ent->inuse || !local) continue;
+        if (local->enemy == victim) {
+            local->enemy = NULL;
+            Wow_ResetAttack(local);
+        }
+        if (local->kind == WOW_ENTITY_PROJECTILE && local->projectile_target == victim_number)
+            ent->inuse = false;
+        if (ent->client && ent->client->ps.selected_entity == victim_number)
+            ent->client->ps.selected_entity = 0;
+    }
 }
 
 static void Wow_FaceTarget(LPEDICT ent, LPEDICT target) {
@@ -169,6 +214,10 @@ void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage) {
 
     target_local->health -= damage;
     Wow_SyncEntityVitals(target);
+    if (target_local->kind == WOW_ENTITY_CREATURE && source && source != target) {
+        target_local->enemy = source;
+        target_local->ai_state = WOW_AI_AGGRO;
+    }
 
     /* Quake2-style reaction: retaliate when not already locked, else play pain. */
     if (source && source != target && target->attack &&
@@ -195,13 +244,12 @@ BOOL Wow_EntityAffectingCombat(LPEDICT ent) {
         return false;
     }
     target = local->enemy;
-    if (!target || !target->inuse || target == ent) {
+    if (!target || target == ent || !Wow_EntityCanBeTargeted(target)) {
         local->enemy = NULL;
         return false;
     }
     target_local = Wow_EntityLocal(target);
-    if (local->dead || (local->health == 0) ||
-        (target_local && (target_local->dead || target_local->health == 0))) {
+    if (local->dead || local->health == 0 || !target_local) {
         local->enemy = NULL;
         return false;
     }
@@ -317,6 +365,7 @@ void Wow_AIAttack(LPEDICT ent) {
     {
         VECTOR2 delta = Vector2_sub(&target->s.origin2, &ent->s.origin2);
         if (Vector2_len(&delta) > WOW_MELEE_RANGE) {
+            if (local->kind == WOW_ENTITY_CREATURE) local->ai_state = WOW_AI_CHASE;
             return;
         }
     }
@@ -330,6 +379,7 @@ void Wow_AIAttack(LPEDICT ent) {
     local->attack_backswing_time = backswing;
     local->attack_time = damage_point + backswing;
     local->attack_damage_done = false;
+    if (local->kind == WOW_ENTITY_CREATURE) local->ai_state = WOW_AI_ATTACK;
 }
 
 void Wow_AIPain(LPEDICT ent) {
@@ -363,15 +413,16 @@ void Wow_AIDie(LPEDICT ent, LPEDICT attacker) {
     }
 
     local->dead = true;
+    local->ai_state = WOW_AI_DEAD;
     local->health = 0;
     local->enemy = NULL;
-    local->attack_time = 0;
-    local->attack_damage_time = 0;
-    local->attack_backswing_time = 0;
-    local->attack_damage_done = false;
-    local->pain_time = 0;
+    Wow_ResetAttack(local);
+    local->respawn_time = local->kind == WOW_ENTITY_CREATURE ? BZ_WOW_CREATURE_RESPAWN_TIME : 0;
+    local->regen_time = 0;
 
     ent->svflags |= SVF_DEADMONSTER;
+    if (local->kind == WOW_ENTITY_CREATURE) ent->svflags &= ~SVF_MONSTER;
+    Wow_ClearCombatReferences(ent);
     Wow_SyncEntityVitals(ent);
     Wow_AwardKillXp(attacker, ent);
     if (Wow_SetEntityMoveFirstAnimation(ent, &wow_move_death, death_animations) && local->animation) {
@@ -421,9 +472,8 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
             LPEDICT target = Wow_EntityAffectingCombat(ent) ? local->enemy : NULL;
 
             local->attack_damage_done = true;
-            if (target) {
-                Wow_DealDamage(target, ent, 1);
-            }
+            if (target && Wow_Distance2(&target->s.origin2, &ent->s.origin2) <= WOW_MELEE_RANGE)
+                Wow_DealDamage(target, ent, BZ_WOW_CREATURE_ATTACK_DAMAGE);
         }
         return true;
     }
@@ -471,8 +521,92 @@ BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent) {
     return false;
 }
 
+/* Chase and evade share movement but use different destinations, speeds, and stopping distances. */
+static BOOL Wow_AIMoveToward(LPEDICT ent, LPCVECTOR2 target, FLOAT speed, FLOAT stop_distance) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    VECTOR2 delta;
+    FLOAT distance;
+    FLOAT step;
+
+    if (!ent || !local || !target) return false;
+    delta = Vector2_sub(target, &ent->s.origin2);
+    distance = Vector2_len(&delta);
+    if (distance <= stop_distance || distance <= 0.001f) return false;
+    step = MIN(speed * ((FLOAT)FRAMETIME / 1000.0f), distance - stop_distance);
+    ent->s.origin.x += delta.x * step / distance;
+    ent->s.origin.y += delta.y * step / distance;
+    ent->s.origin.z = Wow_TerrainHeight(ent->s.origin.x, ent->s.origin.y);
+    ent->s.origin2 = (VECTOR2){ ent->s.origin.x, ent->s.origin.y };
+    local->yaw = (FLOAT)RAD2DEG(atan2f(delta.y, delta.x));
+    ent->s.angle = (FLOAT)DEG2RAD(local->yaw);
+    Wow_SetRunMove(ent);
+    return true;
+}
+
+/* Idle creatures only acquire the single server player inside their configured aggro radius. */
+static BOOL Wow_AIAcquirePlayer(LPEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    LPEDICT player = &wow_edicts[0];
+
+    if (!ent || !local || !Wow_EntityCanBeTargeted(player) ||
+        Wow_Distance2(&player->s.origin2, &ent->s.origin2) > BZ_WOW_CREATURE_AGGRO_RANGE) return false;
+    local->enemy = player;
+    local->ai_state = WOW_AI_AGGRO;
+    Wow_SetCombatReadyAnimation(ent);
+    return true;
+}
+
+static BOOL Wow_AIShouldEvade(LPEDICT ent, wowEntityLocal_t *local) {
+    return !ent || !local || !local->enemy ||
+        Wow_Distance2(&ent->s.origin2, &local->home) > BZ_WOW_CREATURE_LEASH_RANGE ||
+        Wow_Distance2(&local->enemy->s.origin2, &local->home) > BZ_WOW_CREATURE_LEASH_RANGE;
+}
+
+/* Evade clears combat ownership immediately and restores health on a fixed server-time cadence. */
+static void Wow_AIEnterEvade(LPEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+    if (!ent || !local) return;
+    local->enemy = NULL;
+    local->ai_state = WOW_AI_EVADE;
+    local->regen_time = BZ_WOW_CREATURE_REGEN_TIME;
+    Wow_ResetAttack(local);
+    Wow_SetRunMove(ent);
+}
+
+static void Wow_AIRegenerate(LPEDICT ent, wowEntityLocal_t *local) {
+    if (!ent || !local || local->health >= local->max_health) return;
+    if (local->regen_time > FRAMETIME) {
+        local->regen_time -= FRAMETIME;
+        return;
+    }
+    local->regen_time = BZ_WOW_CREATURE_REGEN_TIME;
+    local->health++;
+    Wow_SyncEntityVitals(ent);
+}
+
+/* Respawn reuses the same edict while restoring every combat-owned field to its spawn contract. */
+static void Wow_AIRespawn(LPEDICT ent) {
+    wowEntityLocal_t *local = Wow_EntityLocal(ent);
+
+    if (!ent || !local || local->kind != WOW_ENTITY_CREATURE) return;
+    local->dead = false;
+    local->ai_state = WOW_AI_IDLE;
+    local->health = local->max_health;
+    local->enemy = NULL;
+    local->death_time = local->respawn_time = local->regen_time = 0;
+    Wow_ResetAttack(local);
+    ent->s.origin = (VECTOR3){ local->home.x, local->home.y, Wow_TerrainHeight(local->home.x, local->home.y) };
+    ent->s.origin2 = local->home;
+    ent->svflags = (ent->svflags | SVF_MONSTER) & ~SVF_DEADMONSTER;
+    ent->selected = 0;
+    Wow_SyncEntityVitals(ent);
+    Wow_SetStandMove(ent);
+}
+
 void Wow_AIRunFrame(LPEDICT ent) {
     wowEntityLocal_t *local = Wow_EntityLocal(ent);
+    FLOAT target_distance;
 
     if (!ent || !local) {
         return;
@@ -480,24 +614,55 @@ void Wow_AIRunFrame(LPEDICT ent) {
 
     if (local->dead) {
         (void)Wow_AIAdvanceLockedFrame(ent);
+        if (local->kind != WOW_ENTITY_CREATURE) return;
+        if (local->ai_state == WOW_AI_DEAD && !local->death_time) local->ai_state = WOW_AI_RESPAWN;
+        if (local->ai_state == WOW_AI_RESPAWN) {
+            if (local->respawn_time > FRAMETIME) local->respawn_time -= FRAMETIME;
+            else Wow_AIRespawn(ent);
+        }
         return;
     }
 
-    if (Wow_AIAdvanceLockedFrame(ent)) {
+    if (local->ai_state == WOW_AI_EVADE) {
+        Wow_AIRegenerate(ent, local);
+        if (!Wow_AIMoveToward(ent, &local->home, BZ_WOW_CREATURE_EVADE_SPEED, 0.0f) &&
+            local->health == local->max_health) {
+            local->ai_state = WOW_AI_IDLE;
+            Wow_SetStandMove(ent);
+        }
+        Wow_AdvanceEntityFrame(ent);
         return;
     }
 
-    if (local->patrol_radius > 0.0f && local->walk_speed > 0.0f) {
+    if (local->ai_state == WOW_AI_IDLE) {
+        if (Wow_AIAcquirePlayer(ent)) {
+            Wow_AdvanceEntityFrame(ent);
+            return;
+        }
+        if (local->patrol_radius <= 0.0f || local->walk_speed <= 0.0f) {
+            if (ent->idle) ent->idle(ent);
+            Wow_AdvanceEntityFrame(ent);
+            return;
+        }
         local->patrol_phase += ((FLOAT)FRAMETIME / 1000.0f) * 0.6f;
-        if (ent->move) {
-            ent->move(ent);
-        }
-    } else {
-        if (ent->idle) {
-            ent->idle(ent);
-        }
+        if (ent->move) ent->move(ent);
+        Wow_AdvanceEntityFrame(ent);
+        return;
     }
 
+    if (!Wow_EntityAffectingCombat(ent) || Wow_AIShouldEvade(ent, local)) {
+        Wow_AIEnterEvade(ent);
+        return;
+    }
+    if (Wow_AIAdvanceLockedFrame(ent)) return;
+    target_distance = Wow_Distance2(&local->enemy->s.origin2, &ent->s.origin2);
+    if (target_distance > WOW_MELEE_RANGE) {
+        local->ai_state = WOW_AI_CHASE;
+        Wow_AIMoveToward(ent, &local->enemy->s.origin2, BZ_WOW_CREATURE_CHASE_SPEED, WOW_MELEE_RANGE);
+    } else {
+        local->ai_state = WOW_AI_ATTACK;
+        if (ent->attack) ent->attack(ent);
+    }
     Wow_AdvanceEntityFrame(ent);
 }
 

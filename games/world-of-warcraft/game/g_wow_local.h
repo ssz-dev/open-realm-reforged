@@ -27,6 +27,13 @@
 #define BZ_WOW_PLAYER_MAX_POWER 100
 #define BZ_WOW_CREATURE_BASE_HEALTH 3
 #define BZ_WOW_CREATURE_KILL_XP 100
+#define BZ_WOW_CREATURE_AGGRO_RANGE 14.0f
+#define BZ_WOW_CREATURE_LEASH_RANGE 35.0f
+#define BZ_WOW_CREATURE_CHASE_SPEED 5.0f
+#define BZ_WOW_CREATURE_EVADE_SPEED 8.0f
+#define BZ_WOW_CREATURE_REGEN_TIME 500
+#define BZ_WOW_CREATURE_RESPAWN_TIME 5000
+#define BZ_WOW_CREATURE_ATTACK_DAMAGE 1
 #define WOW_MELEE_RANGE 5.0f
 #define WOW_CAMERA_MIN_PITCH 300.0f
 #define WOW_CAMERA_MAX_PITCH 350.0f
@@ -40,6 +47,16 @@ typedef enum {
     WOW_ENTITY_PROJECTILE,
 } wowEntityKind_t;
 
+typedef enum {
+    WOW_AI_IDLE,
+    WOW_AI_AGGRO,
+    WOW_AI_CHASE,
+    WOW_AI_ATTACK,
+    WOW_AI_EVADE,
+    WOW_AI_DEAD,
+    WOW_AI_RESPAWN,
+} wowAiState_t;
+
 typedef struct wowMove_s {
     LPCSTR animation;
     void (*think)(LPEDICT ent);
@@ -48,6 +65,7 @@ typedef struct wowMove_s {
 
 typedef struct {
     wowEntityKind_t kind;
+    wowAiState_t ai_state;
     DWORD display_id;
     LPCANIMATION animation;
     LPWOWMOVE currentmove;
@@ -70,6 +88,8 @@ typedef struct {
     DWORD attack_backswing_time;
     DWORD pain_time;
     DWORD death_time;
+    DWORD respawn_time;
+    DWORD regen_time;
     BOOL attack_damage_done;
     BOOL dead;
     BOOL hostile;
@@ -142,6 +162,7 @@ void Wow_AIPain(LPEDICT ent);
 void Wow_AIDie(LPEDICT ent, LPEDICT attacker);
 BOOL Wow_AIAdvanceLockedFrame(LPEDICT ent);
 BOOL Wow_EntityAffectingCombat(LPEDICT ent);
+BOOL Wow_EntityCanBeTargeted(LPCEDICT ent);
 void Wow_DealDamage(LPEDICT target, LPEDICT attacker, DWORD damage);
 void Wow_SyncEntityVitals(LPEDICT ent);
 DWORD Wow_XpForNextLevel(DWORD level);

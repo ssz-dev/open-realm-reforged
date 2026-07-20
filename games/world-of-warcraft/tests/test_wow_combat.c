@@ -29,6 +29,13 @@ static animation_t g_death_anim = {
 };
 
 static DWORD g_pain_calls = 0;
+static struct client_s g_player_client;
+
+FLOAT Wow_TerrainHeight(FLOAT x, FLOAT y) {
+    (void)x;
+    (void)y;
+    return 7.0f;
+}
 
 DWORD Wow_EntityIndex(LPCEDICT ent) {
     if (!ent || ent < wow_edicts || ent >= wow_edicts + WOW_MAX_EDICTS) {
@@ -124,6 +131,7 @@ static void test_pain_stub(LPEDICT ent) {
 static void test_reset_world(void) {
     memset(wow_edicts, 0, sizeof(wow_edicts));
     memset(wow_entity_locals, 0, sizeof(wow_entity_locals));
+    memset(&g_player_client, 0, sizeof(g_player_client));
     g_pain_calls = 0;
 }
 
@@ -161,6 +169,40 @@ static void test_prepare_pair(LPEDICT *attacker_out, LPEDICT *target_out) {
 
     *attacker_out = attacker;
     *target_out = target;
+}
+
+/* State-machine tests share one real player and one fully wired creature. */
+static void test_prepare_player_creature(LPEDICT *player_out, LPEDICT *creature_out) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+
+    test_prepare_pair(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    player->client = &g_player_client;
+    player->pain = Wow_AIPain;
+    player_local->kind = WOW_ENTITY_PLAYER;
+    player_local->health = player_local->max_health = BZ_WOW_PLAYER_BASE_HEALTH;
+    player_local->max_power = BZ_WOW_PLAYER_MAX_POWER;
+    player_local->level = 1;
+    player_local->enemy = NULL;
+    creature->svflags = SVF_MONSTER;
+    creature->idle = Wow_AIIdle;
+    creature->move = Wow_AIMove;
+    creature->run = Wow_AIRunFrame;
+    creature->attack = Wow_AIAttack;
+    creature->pain = Wow_AIPain;
+    creature_local->ai_state = WOW_AI_IDLE;
+    creature_local->home = creature->s.origin2;
+    creature_local->walk_speed = 2.0f;
+    creature_local->attack_damage_point = 200;
+    creature_local->attack_backswing = 300;
+    creature_local->enemy = NULL;
+    creature_local->xp_reward = BZ_WOW_CREATURE_KILL_XP;
+    *player_out = player;
+    *creature_out = creature;
 }
 
 static void test_wow_attack_applies_damage_after_damage_point(void) {
@@ -210,6 +252,19 @@ static void test_wow_attack_uses_explicit_timing_over_animation_split(void) {
     ASSERT_EQ_INT((int)attacker_local->attack_damage_time, 120);
     ASSERT_EQ_INT((int)attacker_local->attack_backswing_time, 180);
     ASSERT_EQ_INT((int)attacker_local->attack_time, 300);
+}
+
+static void test_wow_swing_requires_target_in_range_at_damage_point(void) {
+    LPEDICT attacker;
+    LPEDICT target;
+    wowEntityLocal_t *target_local;
+
+    test_prepare_pair(&attacker, &target);
+    target_local = Wow_EntityLocal(target);
+    Wow_AIAttack(attacker);
+    target->s.origin2.x = WOW_MELEE_RANGE + 1.0f;
+    FOR_LOOP(i, 4) Wow_AIAdvanceLockedFrame(attacker);
+    ASSERT_EQ_INT((int)target_local->health, 3);
 }
 
 static void test_wow_attack_lethal_triggers_death_state(void) {
@@ -353,9 +408,166 @@ static void test_wow_combat_generates_player_resource(void) {
     ASSERT_EQ_INT((int)player_local->power, BZ_WOW_PLAYER_MAX_POWER);
 }
 
+static void test_wow_creature_aggros_and_chases_player_by_proximity(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+    FLOAT before;
+
+    test_prepare_player_creature(&player, &creature);
+    creature->s.origin2.x = creature->s.origin.x = 10.0f;
+    local = Wow_EntityLocal(creature);
+    local->home = creature->s.origin2;
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_AGGRO);
+    ASSERT(local->enemy == player);
+    before = creature->s.origin.x;
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_CHASE);
+    ASSERT(creature->s.origin.x < before);
+}
+
+static void test_wow_creature_aggros_from_player_damage_outside_proximity(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *local;
+
+    test_prepare_player_creature(&player, &creature);
+    creature->s.origin2.x = creature->s.origin.x = BZ_WOW_CREATURE_AGGRO_RANGE + 6.0f;
+    local = Wow_EntityLocal(creature);
+    local->home = creature->s.origin2;
+    Wow_DealDamage(creature, player, 1);
+    ASSERT(local->enemy == player);
+    ASSERT_EQ_INT((int)local->ai_state, WOW_AI_CHASE);
+}
+
+static void test_wow_creature_aggros_projectile_caster(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    LPEDICT projectile = &wow_edicts[2];
+    wowEntityLocal_t *creature_local;
+    wowEntityLocal_t *projectile_local;
+
+    test_prepare_player_creature(&player, &creature);
+    creature_local = Wow_EntityLocal(creature);
+    projectile_local = Wow_EntityLocal(projectile);
+    creature->s.origin2.x = creature->s.origin.x = BZ_WOW_CREATURE_AGGRO_RANGE + 6.0f;
+    creature_local->home = creature->s.origin2;
+    projectile->inuse = true;
+    projectile_local->kind = WOW_ENTITY_PROJECTILE;
+    projectile_local->projectile_caster = player->s.number;
+    Wow_DealDamage(creature, projectile, 1);
+    ASSERT(creature_local->enemy == player);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_CHASE);
+}
+
+static void test_wow_creature_attack_uses_cooldown_and_real_player_vitals(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+
+    test_prepare_player_creature(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    creature->s.origin2.x = creature->s.origin.x = 4.0f;
+    creature_local->home = creature->s.origin2;
+    Wow_AIRunFrame(creature);
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_ATTACK);
+    ASSERT_EQ_INT((int)player_local->health, BZ_WOW_PLAYER_BASE_HEALTH);
+    Wow_AIRunFrame(creature);
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)player_local->health, BZ_WOW_PLAYER_BASE_HEALTH - 1);
+    ASSERT_EQ_INT((int)player_local->power, 3);
+    ASSERT_EQ_INT((int)player->s.stats[ENT_HEALTH], 253);
+    FOR_LOOP(i, 4) {
+        Wow_AIRunFrame(creature);
+        ASSERT_EQ_INT((int)player_local->health, BZ_WOW_PLAYER_BASE_HEALTH - 1);
+    }
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)player_local->health, BZ_WOW_PLAYER_BASE_HEALTH - 2);
+}
+
+static void test_wow_creature_leashes_and_regenerates_without_xp(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+    FLOAT before;
+
+    test_prepare_player_creature(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    creature_local->health = 1;
+    creature_local->home = (VECTOR2){ 0.0f, 0.0f };
+    creature_local->enemy = player;
+    creature_local->ai_state = WOW_AI_CHASE;
+    creature->s.origin2.x = creature->s.origin.x = 20.0f;
+    player->s.origin2.x = player->s.origin.x = BZ_WOW_CREATURE_LEASH_RANGE + 1.0f;
+    Wow_AIRunFrame(creature);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_EVADE);
+    ASSERT_NULL(creature_local->enemy);
+    before = creature->s.origin.x;
+    FOR_LOOP(i, 5) Wow_AIRunFrame(creature);
+    ASSERT(creature->s.origin.x < before);
+    ASSERT_EQ_INT((int)creature_local->health, 2);
+    ASSERT_EQ_INT((int)player_local->xp, 0);
+}
+
+static void test_wow_creature_death_awards_once_and_respawns_clean(void) {
+    LPEDICT player;
+    LPEDICT creature;
+    LPEDICT projectile = &wow_edicts[2];
+    wowEntityLocal_t *player_local;
+    wowEntityLocal_t *creature_local;
+    wowEntityLocal_t *projectile_local;
+
+    test_prepare_player_creature(&player, &creature);
+    player_local = Wow_EntityLocal(player);
+    creature_local = Wow_EntityLocal(creature);
+    projectile_local = Wow_EntityLocal(projectile);
+    creature_local->health = 1;
+    creature_local->home = (VECTOR2){ 12.0f, 8.0f };
+    creature_local->enemy = player;
+    player_local->enemy = creature;
+    player_local->attack_damage_time = 100;
+    player->client->ps.selected_entity = creature->s.number;
+    creature->selected = 1;
+    projectile->inuse = true;
+    projectile_local->kind = WOW_ENTITY_PROJECTILE;
+    projectile_local->projectile_target = creature->s.number;
+    Wow_DealDamage(creature, player, 1);
+    ASSERT(creature_local->dead);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_DEAD);
+    ASSERT_EQ_INT((int)creature_local->health, 0);
+    ASSERT((creature->svflags & SVF_DEADMONSTER) != 0);
+    ASSERT((creature->svflags & SVF_MONSTER) == 0);
+    ASSERT_NULL(player_local->enemy);
+    ASSERT_EQ_INT((int)player->client->ps.selected_entity, 0);
+    ASSERT_EQ_INT((int)creature->selected, 0);
+    ASSERT(!projectile->inuse);
+    ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+    Wow_AIDie(creature, player);
+    ASSERT_EQ_INT((int)player_local->xp, BZ_WOW_CREATURE_KILL_XP);
+    player->s.origin2.x = player->s.origin.x = 100.0f;
+    FOR_LOOP(i, 70) Wow_AIRunFrame(creature);
+    ASSERT(!creature_local->dead);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_IDLE);
+    ASSERT_EQ_INT((int)creature_local->health, (int)creature_local->max_health);
+    ASSERT_NULL(creature_local->enemy);
+    ASSERT((creature->svflags & SVF_MONSTER) != 0);
+    ASSERT((creature->svflags & SVF_DEADMONSTER) == 0);
+    ASSERT_EQ_FLOAT(creature->s.origin.x, creature_local->home.x, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.y, creature_local->home.y, 0.001f);
+    ASSERT_EQ_FLOAT(creature->s.origin.z, 7.0f, 0.001f);
+    ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 255);
+}
+
 int main(void) {
     RUN_TEST(test_wow_attack_applies_damage_after_damage_point);
     RUN_TEST(test_wow_attack_uses_explicit_timing_over_animation_split);
+    RUN_TEST(test_wow_swing_requires_target_in_range_at_damage_point);
     RUN_TEST(test_wow_attack_lethal_triggers_death_state);
     RUN_TEST(test_wow_dead_entity_ignores_pain_and_attack);
     RUN_TEST(test_wow_death_holds_terminal_frame);
@@ -363,5 +575,11 @@ int main(void) {
     RUN_TEST(test_wow_player_kill_grants_xp_and_levels_with_overflow);
     RUN_TEST(test_wow_projectile_kill_credits_player_caster);
     RUN_TEST(test_wow_combat_generates_player_resource);
+    RUN_TEST(test_wow_creature_aggros_and_chases_player_by_proximity);
+    RUN_TEST(test_wow_creature_aggros_from_player_damage_outside_proximity);
+    RUN_TEST(test_wow_creature_aggros_projectile_caster);
+    RUN_TEST(test_wow_creature_attack_uses_cooldown_and_real_player_vitals);
+    RUN_TEST(test_wow_creature_leashes_and_regenerates_without_xp);
+    RUN_TEST(test_wow_creature_death_awards_once_and_respawns_clean);
     TEST_RESULTS();
 }

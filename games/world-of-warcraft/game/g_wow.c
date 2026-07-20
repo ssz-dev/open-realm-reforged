@@ -519,7 +519,7 @@ void Wow_RunProjectile(LPEDICT ent) {
         return;
     }
     target = Wow_EdictByNumber(local->projectile_target);
-    if (!target || !target->inuse) {
+    if (!Wow_EntityCanBeTargeted(target)) {
         ent->inuse = false;
         return;
     }
@@ -549,15 +549,7 @@ void Wow_FireFirebolt(LPEDICT caster, LPEDICT target) {
     LPEDICT proj;
     FLOAT yaw;
 
-    if (!caster || !target || caster == target || !target->inuse) {
-        return;
-    }
-    {
-        wowEntityLocal_t *target_local = Wow_EntityLocal(target);
-        if (target_local && target_local->dead) {
-            return;
-        }
-    }
+    if (!caster || !target || caster == target || !Wow_EntityCanBeTargeted(target)) return;
     caster_local = Wow_EntityLocal(caster);
     if (!caster_local || caster_local->dead) {
         return;
@@ -622,7 +614,7 @@ void Wow_HealingTouch(LPEDICT caster) {
 LPEDICT Wow_FindSpellTarget(LPEDICT ent, FLOAT range) {
     if (ent && ent->client && ent->client->ps.selected_entity) {
         LPEDICT t = Wow_EdictByNumber(ent->client->ps.selected_entity);
-        if (t && t != ent && t->inuse) {
+        if (t && t != ent && Wow_EntityCanBeTargeted(t)) {
             VECTOR2 delta = Vector2_sub(&t->s.origin2, &ent->s.origin2);
             if (sqrtf(delta.x * delta.x + delta.y * delta.y) <= range) {
                 return t;
@@ -631,7 +623,7 @@ LPEDICT Wow_FindSpellTarget(LPEDICT ent, FLOAT range) {
     }
     {
         wowEntityLocal_t *local = Wow_EntityLocal(ent);
-        if (local && local->enemy && local->enemy != ent && local->enemy->inuse) {
+        if (local && local->enemy && local->enemy != ent && Wow_EntityCanBeTargeted(local->enemy)) {
             VECTOR2 delta = Vector2_sub(&local->enemy->s.origin2, &ent->s.origin2);
             if (sqrtf(delta.x * delta.x + delta.y * delta.y) <= range) {
                 return local->enemy;
@@ -760,7 +752,7 @@ static LPEDICT Wow_FindNearestAttackTarget(LPEDICT ent) {
         VECTOR2 delta;
         FLOAT dist2;
 
-        if (!candidate->inuse || candidate == ent || !(candidate->svflags & SVF_MONSTER)) {
+        if (candidate == ent || !(candidate->svflags & SVF_MONSTER) || !Wow_EntityCanBeTargeted(candidate)) {
             continue;
         }
 
@@ -1120,6 +1112,7 @@ static void Wow_SpawnEntities(void) {
 
 static void Wow_RunFrame(void) {
     LPEDICT ent = &wow_edicts[0];
+    wowEntityLocal_t *player_local;
     VECTOR2 forward;
     VECTOR2 right;
     VECTOR2 dir = { 0.0f, 0.0f };
@@ -1129,6 +1122,13 @@ static void Wow_RunFrame(void) {
 
     if (!ent->inuse || !ent->client) {
         return;
+    }
+    player_local = Wow_EntityLocal(ent);
+    if (player_local && player_local->dead) {
+        (void)Wow_AIAdvanceLockedFrame(ent);
+        Wow_UpdateCamera(ent);
+        Wow_UpdatePlayerHud(ent);
+        goto run_world_entities;
     }
 
     Wow_AngleVectors(wow_move.yaw, &forward, &right);
@@ -1205,6 +1205,7 @@ static void Wow_RunFrame(void) {
     }
     Wow_UpdatePlayerHud(ent);
 
+run_world_entities:
     for (DWORD i = WOW_MAX_CLIENTS; i < (DWORD)globals.num_edicts; i++) {
         LPEDICT e = &wow_edicts[i];
         if (e->inuse) {
@@ -1296,7 +1297,7 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
             ? Wow_EdictByNumber((DWORD)strtoul(argv[1], NULL, 10))
             : NULL;
 
-        if (target && target != ent && target->inuse) {
+        if (target && target != ent && Wow_EntityCanBeTargeted(target)) {
             ent->client->ps.selected_entity = target->s.number;
         } else {
             ent->client->ps.selected_entity = 0;
@@ -1310,6 +1311,7 @@ static void Wow_ClientCommand(LPEDICT ent, DWORD argc, LPCSTR argv[]) {
         if (!ent || !local || local->dead || !ent->attack) {
             return;
         }
+        if (!Wow_EntityCanBeTargeted(target)) target = NULL;
         local->enemy = target && target != ent ? target : NULL;
         ent->client->ps.selected_entity = target && target != ent ? target->s.number : 0;
         ent->attack(ent);

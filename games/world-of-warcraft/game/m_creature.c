@@ -188,6 +188,7 @@ static void Wow_MonsterStart(LPEDICT ent,
         return;
     }
     local->kind = WOW_ENTITY_CREATURE;
+    local->ai_state = WOW_AI_IDLE;
     local->hostile = true;
     local->display_id = display_id;
     local->home = home ? *home : ent->s.origin2;

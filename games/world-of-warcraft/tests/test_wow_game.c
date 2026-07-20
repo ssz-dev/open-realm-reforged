@@ -621,6 +621,7 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     ASSERT_EQ_INT((int)creature_local->max_health, BZ_WOW_CREATURE_BASE_HEALTH);
     ASSERT_EQ_INT((int)creature_local->level, 1);
     ASSERT_EQ_INT((int)creature_local->xp_reward, BZ_WOW_CREATURE_KILL_XP);
+    ASSERT_EQ_INT((int)creature_local->ai_state, WOW_AI_IDLE);
     ASSERT_EQ_INT((int)creature->s.stats[ENT_HEALTH], 255);
     ASSERT((creature->svflags & SVF_MONSTER) != 0);
     ASSERT((creature->s.flags & EF_GROUND_ANCHOR) != 0);
@@ -647,6 +648,8 @@ static void test_wow_load_map_spawns_and_runs_creature_state(void) {
     ASSERT(player_local->attack_backswing_time > 0);
     ASSERT_NOT_NULL(player_local->animation);
     ASSERT_STR_EQ(player_local->animation->name, "Attack1H");
+    ASSERT(creature_local->enemy == player);
+    ASSERT(creature_local->ai_state == WOW_AI_CHASE || creature_local->ai_state == WOW_AI_ATTACK);
 
     if (game->Shutdown) {
         game->Shutdown();
